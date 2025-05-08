@@ -5,5 +5,115 @@ date: "2025-04-29"
 ---
 
 ```{r}
+require(pacman)
+
+p_load(
+  tidyverse,
+  tidymodels,
+  ggplot2,
+  plotly,
+  leaflet,
+  sf,
+  visdat,
+  geojsonsf,
+  stringr,
+  tm,
+  stringi
+  )
+```
+```{r}
+raw_data_path <- './data'
+
+db_train <- read_csv(file.path(raw_data_path, 'train.csv'))
+
+db_test <- read_csv(file.path(raw_data_path, 'test.csv'))
+```
+```{r}
+#db_train <- select(
+#  property_id,
+#  price,
+#  year,
+#  rooms,
+#  bedrooms,
+#  bathrooms,
+#  property_type,
+#  lat,
+#  lon,
+#  title,
+#  description
+#)
+
+
+```
+```{r}
+vis_dat(db_train)
+```
+```{r}
+localidades <- read_delim(
+  file.path(raw_data_path, 'poligonos_localidades.csv'), 
+  delim = ';', 
+  col_select = c(
+    "Geo Shape 2", 
+    "Nombre de la localidad"))
+ 
+names(localidades) <- c(
+    'geoshape',
+    'localidad'
+  )
+
+localidades <- localidades %>% 
+  filter(!localidad %in% c('SUMAPAZ', 'USME'))
+
+localidades_sf <- geojson_sf(localidades$geoshape)
+localidades_sf$localidad <- localidades$localidad
+
+db_train <- st_as_sf(db_train, coords = c('lon', 'lat'), crs = 4326)
+db_train <- st_join(db_train, localidades_sf["localidad"], left = TRUE)
+
+ggplot() +
+  geom_sf(data = db_train, aes(text = paste("localidad:", localidad)), color = "red", size = 1) +
+  geom_sf(data = localidades_sf, fill = "lightgray", color = "black", alpha = 0.2) +
+  theme_minimal()
+
+ggplotly(p, tooltip = "text")
+```
+```{r}
+db_train <- db_train %>%
+  mutate(description_clean = stri_trans_general(description, "Latin-ASCII"))
+
+corpus <- Corpus(VectorSource(db_train$description_clean))
+
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removeWords, stopwords('spanish'))
+corpus <- tm_map(corpus, stripWhitespace)
+
+#creación de matriz con palabras
+dtm <-  TermDocumentMatrix(corpus)
+tdm <- as.matrix(dtm)
+freq_total <- rowSums(tdm)
+df_freq_total <- as.data.frame(freq_total)
+df_freq_total$word <- rownames(df_freq_total)
+df_freq_total <- df_freq_total[order(-df_freq_total$freq_total),]
+```
+```{r}
+parqueadero <- c("parqueadero", "parqueaderos", "garajes", "garaje", "parqueo", "sotano")
+parque <- c("parque", "parques")
+avenidas <- c("vias", "carrera", "avenida", "principales", "autopista", 
+              "transmilenio", "cra", "boyaca", "cll", "cali", "novena", 
+              "avenidas", "esperanza", "americas", "via", "dorado", "septima",
+              "ochenta", "nqs")
+gimnasio <- c("gimnasio", "gym")
+
+db_train <- db_train %>%
+  mutate(
+    parqueaderos = if_else(str_detect(description_clean, str_c(parqueadero, collapse = "|")), 1, 0),
+    parque = if_else(str_detect(description_clean, str_c(parque, collapse = "|")), 1, 0),
+    avenidas = if_else(str_detect(description_clean, str_c(avenidas, collapse = "|")), 1, 0),
+    gimnasio = if_else(str_detect(description_clean, str_c(gimnasio, collapse = "|")), 1, 0),
+    duplex = if_else(str_detect(description_clean, 'duplex'), 1, 0),
+    piscina = if_else(str_detect(description_clean, "piscina"), 1, 0)
+    )
 
 ```
