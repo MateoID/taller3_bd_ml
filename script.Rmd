@@ -16,9 +16,13 @@ p_load(
   sf,
   visdat,
   geojsonsf,
+  geojsonio,
+  jsonlite,
+  purrr,
   stringr,
   tm,
-  stringi
+  stringi,
+  skimr
   )
 ```
 ```{r}
@@ -48,6 +52,7 @@ db_test <- read_csv(file.path(raw_data_path, 'test.csv'))
 ```{r}
 vis_dat(db_train)
 ```
+Importación de información sobre localidades y asignación de viviendas a su respectiva localidad
 ```{r}
 localidades <- read_delim(
   file.path(raw_data_path, 'poligonos_localidades.csv'), 
@@ -62,20 +67,163 @@ names(localidades) <- c(
   )
 
 localidades <- localidades %>% 
-  filter(!localidad %in% c('SUMAPAZ', 'USME'))
+  filter(localidad != 'SUMAPAZ')
 
-localidades_sf <- geojson_sf(localidades$geoshape)
+localidades_list <- map(localidades$geoshape, geojson_sf)
+localidades_sf <- bind_rows(localidades_list)
 localidades_sf$localidad <- localidades$localidad
 
 db_train <- st_as_sf(db_train, coords = c('lon', 'lat'), crs = 4326)
 db_train <- st_join(db_train, localidades_sf["localidad"], left = TRUE)
+```
+importación base de datos estaciones de policía y generación de distancias mínimas a cada vivienda.
+```{r}
+policia <- read_delim(file.path(raw_data_path, 'centro-de-atencion-inmediata-2.csv'), 
+  delim = ';', 
+  col_select = c(
+    "geopoint_"))
 
+policia <- policia %>% 
+  filter(!is.na(geopoint_))
+
+policia_sf <- policia %>%
+  separate(geopoint_, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+policia_sf <- st_join(policia_sf, localidades_sf["localidad"], left = FALSE)
+
+db_train <- st_transform(db_train, 3857)
+policia_sf <- st_transform(policia_sf, 3857)
+
+dist_matrix_policia <- st_distance(db_train, policia_sf)
+
+db_train <- db_train %>%
+  mutate(cai_mts = apply(dist_matrix_policia, 1, min)
+  )
+```
+importación base de datos estaciones de transmilenio y generación de distancias mínimas a cada vivienda.
+```{r}
+tm <- read_delim(file.path(raw_data_path, 'estaciones-de-transmilenio.csv'), 
+  delim = ';', 
+  col_select = c(
+    'geopoint'))
+
+tm_sf <- tm %>%
+  separate(geopoint, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+tm_sf <- st_transform(tm_sf, 3857)
+
+dist_matrix_tm <- st_distance(db_train, tm_sf)
+
+db_train <- db_train %>%
+  mutate(tm_mts = apply(dist_matrix_tm, 1, min))
+```
+importación base de datos de ciclorutas y generación de distancias mínimas a cada vivienda.
+```{r}
+ciclorutas <- read_delim(file.path(raw_data_path, 'ciclorutas.csv'), 
+  delim = ';', 
+  col_select = c(
+    'Geo Shape'))
+
+names(ciclorutas) <- c('geoshape')
+
+ciclorutas <- ciclorutas %>% 
+  filter(!is.na(geoshape))
+
+ciclorutas_list <- map(ciclorutas$geoshape, geojson_sf)
+ciclorutas_sf <- bind_rows(ciclorutas_list)
+
+ciclorutas_sf <- st_transform(ciclorutas_sf, 3857)
+
+dist_matrix_ciclorutas <- st_distance(db_train, ciclorutas_sf)
+
+db_train <- db_train %>%
+  mutate(ciclorutas_mts = apply(dist_matrix_ciclorutas, 1, min))
+```
+Importación de datos de paraderos de SITP y generación de cantidad de paraderos dentro de un radio de n metros
+```{r}
+sitp <- read_delim(file.path(raw_data_path, 'paraderos-sitp.csv'), 
+  delim = ';', 
+  col_select = c(
+    'geopoint'))
+
+sitp_sf <- sitp %>%
+  separate(geopoint, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+sitp_sf <- st_transform(sitp_sf, 3857)
+
+viviendas_buffer <- st_buffer(db_train, dist = 100)
+
+paraderos_por_vivienda <- st_intersects(viviendas_buffer, sitp_sf)
+
+db_train$sitp_100m <- lengths(paraderos_por_vivienda)
+```
+Importación de datos de vías e inclusión de características de la vía más cercana a cada vivienda
+```{r}
+vias <- read_delim(file.path(raw_data_path, 'estado-vias.csv'), 
+  delim = ';', 
+  col_select = c(
+    'Estado de la vías',
+    'Clasificación',
+    'KM_CARRIL',
+    'Geo Shape'
+    ))
+
+names(vias) <- c(
+  'estado_via',
+  'tipo_via',
+  'ancho_via',
+  'geoshape'
+  )
+
+vias <- vias %>% 
+  filter(!is.na(geoshape))
+
+vias <- vias %>% mutate(via_id = row_number())
+
+vias_list <- map(vias$geoshape, geojson_sf)
+vias_sf <- compact(vias_list) %>% bind_rows()
+
+vias_sf <- st_transform(vias_sf, 3857)
+
+dist_matrix_vias <- st_distance(db_train, vias_sf)
+
+db_train <- db_train %>%
+  mutate(via_mts = apply(dist_matrix_vias, 1, min),
+         via_id = apply(dist_matrix_vias, 1, which.min))
+
+db_train <- db_train %>% 
+  left_join(vias %>% select(-geoshape), by=c(via_id)) %>% 
+  select(-via_id)
+```
+
+
+```{r}
 ggplot() +
-  geom_sf(data = db_train, aes(text = paste("localidad:", localidad)), color = "red", size = 1) +
+  geom_sf(data = db_train, color = "red", size = 0.1) +
   geom_sf(data = localidades_sf, fill = "lightgray", color = "black", alpha = 0.2) +
+  geom_sf(data = policia_sf, color = "blue", size = 0.1) +
+  #geom_sf(data = tm_sf, color = "orange", size = 0.1) +
+  #geom_sf(data = sitp_sf, color = "blue", size = 0.1)
   theme_minimal()
+```
+```{r}
+skim(db_train$sitp_100m)
+```
 
-ggplotly(p, tooltip = "text")
+
+```{r}
+db_train <- db_train %>%
+  st_transform(crs = 3857)
+
+db_train$distancia_policia <- apply(
+  st_distance(db_train, policia_sf_m$geo_shape),
+  1,
+  min
+)
+
 ```
 ```{r}
 db_train <- db_train %>%
