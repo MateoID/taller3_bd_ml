@@ -90,8 +90,6 @@ policia_sf <- policia %>%
   separate(geopoint_, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
   st_as_sf(coords = c("lon", "lat"), crs = 4326)
 
-policia_sf <- st_join(policia_sf, localidades_sf["localidad"], left = FALSE)
-
 db_train <- st_transform(db_train, 3857)
 policia_sf <- st_transform(policia_sf, 3857)
 
@@ -100,6 +98,8 @@ dist_matrix_policia <- st_distance(db_train, policia_sf)
 db_train <- db_train %>%
   mutate(cai_mts = apply(dist_matrix_policia, 1, min)
   )
+
+rm(dist_matrix_policia)
 ```
 importación base de datos estaciones de transmilenio y generación de distancias mínimas a cada vivienda.
 ```{r}
@@ -118,6 +118,8 @@ dist_matrix_tm <- st_distance(db_train, tm_sf)
 
 db_train <- db_train %>%
   mutate(tm_mts = apply(dist_matrix_tm, 1, min))
+
+rm(dist_matrix_tm)
 ```
 importación base de datos de ciclorutas y generación de distancias mínimas a cada vivienda.
 ```{r}
@@ -140,6 +142,8 @@ dist_matrix_ciclorutas <- st_distance(db_train, ciclorutas_sf)
 
 db_train <- db_train %>%
   mutate(ciclorutas_mts = apply(dist_matrix_ciclorutas, 1, min))
+
+rm(dist_matrix_ciclorutas)
 ```
 Importación de datos de paraderos de SITP y generación de cantidad de paraderos dentro de un radio de n metros
 ```{r}
@@ -159,6 +163,101 @@ viviendas_buffer <- st_buffer(db_train, dist = 100)
 paraderos_por_vivienda <- st_intersects(viviendas_buffer, sitp_sf)
 
 db_train$sitp_100m <- lengths(paraderos_por_vivienda)
+```
+Asignación de UPLs (como localidades pero más pequeñas)
+```{r}
+upl <- st_read(file.path(raw_data_path, "unidadplaneamientolocal.gpkg"))
+
+upl <- upl %>% 
+  select(
+    'NOMBRE',
+    'SHAPE'
+  ) %>% 
+  rename('upl' = 'NOMBRE')
+
+upl_sf <- st_transform(upl, 4326)
+
+db_train <- st_join(db_train, upl['upl'], left = TRUE)
+```
+
+Invasiones dentro de un radio de n metros
+```{r}
+invasiones <- st_read(file.path(raw_data_path, 'ocupacion_ilegal.gpkg'))
+
+invasiones <- invasiones %>% 
+  select('geom')
+
+invasiones_sf <- st_transform(invasiones, 3857)
+
+invasiones_por_vivienda <- st_intersects(viviendas_buffer, invasiones_sf)
+
+db_train$invasiones_100m <- lengths(invasiones_por_vivienda)
+```
+
+
+```{r}
+m2_sf <- st_read(dsn = file.path(raw_data_path, 'valorintegralm2_greco'))
+
+m2_sf <- m2_sf %>% 
+  rename('median_m2' = 'VrInt_Resi')
+
+m2_sf <- m2_sf %>% filter(median_m2 != 0)
+
+m2_sf <- st_transform(m2_sf, 4326)
+m2_sf <- st_make_valid(m2_sf)
+
+db_train <- st_transform(db_train, 4326)
+
+db_train <- st_join(db_train, m2_sf['median_m2'], left = TRUE)
+
+
+db_train_na <- db_train[is.na(db_train$median_m2), ]
+
+m2_sf <- st_join(m2_sf, upl_sf['upl'], left = TRUE)
+
+resultados_temp <- data.frame(property_id = character(), median_m2 = numeric(), stringsAsFactors = FALSE)
+
+for (u in upl$upl) {
+  nas <- db_train_na %>% filter(upl == u)
+  m2 <- m2_sf %>% filter(upl == u)
+  
+  if (nrow(m2) == 0 | nrow(nas) == 0) next
+  
+  dist_m2 <- st_distance(nas, m2)
+  index_m2 <- apply(dist_m2, 1, which.min)
+  
+  nas_result <- data.frame(
+    property_id = nas$property_id,
+    median_m2 = m2$median_m2[index_m2]
+  )
+  
+  resultados_temp <- bind_rows(resultados_temp, nas_result)
+}
+
+db_train <- db_train %>%
+  left_join(resultados_temp, by = "property_id") %>%
+  mutate(
+    median_m2 = coalesce(median_m2.y, median_m2.x)
+  ) %>%
+  select(-median_m2.x, -median_m2.y)
+
+```
+
+
+```{r}
+df_long <- db_train %>%
+  mutate(price = log(price),
+         median_m2 = log(median_m2)) %>% 
+  pivot_longer(cols = c(price, median_m2), names_to = "precios", values_to = "valores")
+
+# Graficar las curvas de densidad
+ggplot(df_long, aes(x = valores, fill = precios)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Distribuciones de log mediana por manzana y log precios reales",
+       x = "log(precios)",
+       y = "Densidad",
+       fill = "precios") +
+  theme_minimal()
 ```
 Importación de datos de vías e inclusión de características de la vía más cercana a cada vivienda
 ```{r}
