@@ -4,3 +4,5 @@
 .Ruserdata
 
 *.csv
+*gpkg
+data/valorintegralm2_greco/

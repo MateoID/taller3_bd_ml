@@ -25,42 +25,49 @@ p_load(
   skimr
   )
 ```
+Carga de bases de datos
 ```{r}
 raw_data_path <- './data'
 
 db_train <- read_csv(file.path(raw_data_path, 'train.csv'))
 
 db_test <- read_csv(file.path(raw_data_path, 'test.csv'))
-```
-```{r}
-#db_train <- select(
-#  property_id,
-#  price,
-#  year,
-#  rooms,
-#  bedrooms,
-#  bathrooms,
-#  property_type,
-#  lat,
-#  lon,
-#  title,
-#  description
-#)
 
-
-```
-```{r}
-vis_dat(db_train)
-```
-Importación de información sobre localidades y asignación de viviendas a su respectiva localidad
-```{r}
 localidades <- read_delim(
   file.path(raw_data_path, 'poligonos_localidades.csv'), 
   delim = ';', 
   col_select = c(
     "Geo Shape 2", 
     "Nombre de la localidad"))
- 
+
+upl <- st_read(file.path(raw_data_path, "unidadplaneamientolocal.gpkg"))
+
+policia <- read_delim(file.path(raw_data_path, 'centro-de-atencion-inmediata-2.csv'), 
+  delim = ';', 
+  col_select = c(
+    "geopoint_"))
+
+tm <- read_delim(file.path(raw_data_path, 'estaciones-de-transmilenio.csv'), 
+  delim = ';', 
+  col_select = c(
+    'geopoint'))
+
+sitp <- read_delim(file.path(raw_data_path, 'paraderos-sitp.csv'), 
+  delim = ';', 
+  col_select = c(
+    'geopoint'))
+
+ciclorutas <- read_delim(file.path(raw_data_path, 'ciclorutas.csv'), 
+  delim = ';', 
+  col_select = c(
+    'Geo Shape'))
+
+invasiones <- st_read(file.path(raw_data_path, 'ocupacion_ilegal.gpkg'))
+
+m2_sf <- st_read(dsn = file.path(raw_data_path, 'valorintegralm2_greco'))
+```
+Localidades
+```{r}
 names(localidades) <- c(
     'geoshape',
     'localidad'
@@ -73,16 +80,35 @@ localidades_list <- map(localidades$geoshape, geojson_sf)
 localidades_sf <- bind_rows(localidades_list)
 localidades_sf$localidad <- localidades$localidad
 
+# TRAIN
 db_train <- st_as_sf(db_train, coords = c('lon', 'lat'), crs = 4326)
 db_train <- st_join(db_train, localidades_sf["localidad"], left = TRUE)
-```
-importación base de datos estaciones de policía y generación de distancias mínimas a cada vivienda.
-```{r}
-policia <- read_delim(file.path(raw_data_path, 'centro-de-atencion-inmediata-2.csv'), 
-  delim = ';', 
-  col_select = c(
-    "geopoint_"))
 
+# TEST
+db_test <- st_as_sf(db_test, coords = c('lon', 'lat'), crs = 4326)
+db_test <- st_join(db_test, localidades_sf["localidad"], left = TRUE)
+```
+UPLs
+```{r}
+upl <- upl %>% 
+  select(
+    'NOMBRE',
+    'SHAPE'
+  ) %>% 
+  rename('upl' = 'NOMBRE')
+
+# TRAIN
+upl_sf <- st_transform(upl, crs = st_crs(db_train))
+
+db_train <- st_join(db_train, upl_sf['upl'], left = TRUE)
+
+# TEST
+upl_sf <- st_transform(upl, crs = st_crs(db_test))
+
+db_test <- st_join(db_test, upl_sf['upl'], left = TRUE)
+```
+Policía - CAIs
+```{r}
 policia <- policia %>% 
   filter(!is.na(geopoint_))
 
@@ -90,9 +116,11 @@ policia_sf <- policia %>%
   separate(geopoint_, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
   st_as_sf(coords = c("lon", "lat"), crs = 4326)
 
-db_train <- st_transform(db_train, 3857)
+
 policia_sf <- st_transform(policia_sf, 3857)
 
+# TRAIN
+db_train <- st_transform(db_train, 3857)
 dist_matrix_policia <- st_distance(db_train, policia_sf)
 
 db_train <- db_train %>%
@@ -100,34 +128,65 @@ db_train <- db_train %>%
   )
 
 rm(dist_matrix_policia)
-```
-importación base de datos estaciones de transmilenio y generación de distancias mínimas a cada vivienda.
-```{r}
-tm <- read_delim(file.path(raw_data_path, 'estaciones-de-transmilenio.csv'), 
-  delim = ';', 
-  col_select = c(
-    'geopoint'))
 
+# TEST
+db_test <- st_transform(db_test, 3857)
+dist_matrix_policia <- st_distance(db_test, policia_sf)
+
+db_test <- db_test %>%
+  mutate(cai_mts = apply(dist_matrix_policia, 1, min)
+  )
+
+rm(dist_matrix_policia)
+```
+Estaciones de Transmilenio
+```{r}
 tm_sf <- tm %>%
   separate(geopoint, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
   st_as_sf(coords = c("lon", "lat"), crs = 4326)
 
 tm_sf <- st_transform(tm_sf, 3857)
 
+# TRAIN
 dist_matrix_tm <- st_distance(db_train, tm_sf)
 
 db_train <- db_train %>%
   mutate(tm_mts = apply(dist_matrix_tm, 1, min))
 
 rm(dist_matrix_tm)
-```
-importación base de datos de ciclorutas y generación de distancias mínimas a cada vivienda.
-```{r}
-ciclorutas <- read_delim(file.path(raw_data_path, 'ciclorutas.csv'), 
-  delim = ';', 
-  col_select = c(
-    'Geo Shape'))
 
+# TEST
+dist_matrix_tm <- st_distance(db_test, tm_sf)
+
+db_test <- db_test %>%
+  mutate(tm_mts = apply(dist_matrix_tm, 1, min))
+
+rm(dist_matrix_tm)
+```
+Paradas de SITP
+```{r}
+sitp_sf <- sitp %>%
+  separate(geopoint, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326)
+
+sitp_sf <- st_transform(sitp_sf, 3857)
+
+# TRAIN
+viviendas_buffer_train <- st_buffer(db_train, dist = 100)
+
+paraderos_por_vivienda_train <- st_intersects(viviendas_buffer_train, sitp_sf)
+
+db_train$sitp_100m <- lengths(paraderos_por_vivienda_train)
+
+# TEST
+viviendas_buffer_test <- st_buffer(db_test , dist = 100)
+
+paraderos_por_vivienda_test <- st_intersects(viviendas_buffer_test, sitp_sf)
+
+db_test$sitp_100m <- lengths(paraderos_por_vivienda_test)
+```
+Ciclorutas
+```{r}
 names(ciclorutas) <- c('geoshape')
 
 ciclorutas <- ciclorutas %>% 
@@ -138,66 +197,41 @@ ciclorutas_sf <- bind_rows(ciclorutas_list)
 
 ciclorutas_sf <- st_transform(ciclorutas_sf, 3857)
 
+# TRAIN
 dist_matrix_ciclorutas <- st_distance(db_train, ciclorutas_sf)
 
 db_train <- db_train %>%
   mutate(ciclorutas_mts = apply(dist_matrix_ciclorutas, 1, min))
 
 rm(dist_matrix_ciclorutas)
+
+# TEST
+dist_matrix_ciclorutas <- st_distance(db_test, ciclorutas_sf)
+
+db_test <- db_test %>%
+  mutate(ciclorutas_mts = apply(dist_matrix_ciclorutas, 1, min))
+
+rm(dist_matrix_ciclorutas)
 ```
-Importación de datos de paraderos de SITP y generación de cantidad de paraderos dentro de un radio de n metros
+Invasiones
 ```{r}
-sitp <- read_delim(file.path(raw_data_path, 'paraderos-sitp.csv'), 
-  delim = ';', 
-  col_select = c(
-    'geopoint'))
-
-sitp_sf <- sitp %>%
-  separate(geopoint, into = c("lat", "lon"), sep = ", ", convert = TRUE) %>%
-  st_as_sf(coords = c("lon", "lat"), crs = 4326)
-
-sitp_sf <- st_transform(sitp_sf, 3857)
-
-viviendas_buffer <- st_buffer(db_train, dist = 100)
-
-paraderos_por_vivienda <- st_intersects(viviendas_buffer, sitp_sf)
-
-db_train$sitp_100m <- lengths(paraderos_por_vivienda)
-```
-Asignación de UPLs (como localidades pero más pequeñas)
-```{r}
-upl <- st_read(file.path(raw_data_path, "unidadplaneamientolocal.gpkg"))
-
-upl <- upl %>% 
-  select(
-    'NOMBRE',
-    'SHAPE'
-  ) %>% 
-  rename('upl' = 'NOMBRE')
-
-upl_sf <- st_transform(upl, 4326)
-
-db_train <- st_join(db_train, upl['upl'], left = TRUE)
-```
-
-Invasiones dentro de un radio de n metros
-```{r}
-invasiones <- st_read(file.path(raw_data_path, 'ocupacion_ilegal.gpkg'))
-
 invasiones <- invasiones %>% 
   select('geom')
 
 invasiones_sf <- st_transform(invasiones, 3857)
 
-invasiones_por_vivienda <- st_intersects(viviendas_buffer, invasiones_sf)
+# TRAIN
+invasiones_por_vivienda_train <- st_intersects(viviendas_buffer_train, invasiones_sf)
 
-db_train$invasiones_100m <- lengths(invasiones_por_vivienda)
+db_train$invasiones_100m <- lengths(invasiones_por_vivienda_train)
+
+# TEST
+invasiones_por_vivienda_test <- st_intersects(viviendas_buffer_test, invasiones_sf)
+
+db_test$invasiones_100m <- lengths(invasiones_por_vivienda_test)
 ```
-
-
+Mediana de precio por m2 por manzanas
 ```{r}
-m2_sf <- st_read(dsn = file.path(raw_data_path, 'valorintegralm2_greco'))
-
 m2_sf <- m2_sf %>% 
   rename('median_m2' = 'VrInt_Resi')
 
@@ -206,16 +240,18 @@ m2_sf <- m2_sf %>% filter(median_m2 != 0)
 m2_sf <- st_transform(m2_sf, 4326)
 m2_sf <- st_make_valid(m2_sf)
 
+upl_sf <- st_transform(upl_sf, crs = st_crs(m2_sf))
+
+m2_sf <- st_join(m2_sf, upl_sf['upl'], left = TRUE)
+
+# TRAIN
 db_train <- st_transform(db_train, 4326)
 
 db_train <- st_join(db_train, m2_sf['median_m2'], left = TRUE)
 
-
 db_train_na <- db_train[is.na(db_train$median_m2), ]
 
-m2_sf <- st_join(m2_sf, upl_sf['upl'], left = TRUE)
-
-resultados_temp <- data.frame(property_id = character(), median_m2 = numeric(), stringsAsFactors = FALSE)
+resultados_temp_train <- data.frame(property_id = character(), median_m2 = numeric(), stringsAsFactors = FALSE)
 
 for (u in upl$upl) {
   nas <- db_train_na %>% filter(upl == u)
@@ -231,16 +267,48 @@ for (u in upl$upl) {
     median_m2 = m2$median_m2[index_m2]
   )
   
-  resultados_temp <- bind_rows(resultados_temp, nas_result)
+  resultados_temp_train <- bind_rows(resultados_temp_train, nas_result)
 }
 
 db_train <- db_train %>%
-  left_join(resultados_temp, by = "property_id") %>%
+  left_join(resultados_temp_train, by = "property_id") %>%
   mutate(
     median_m2 = coalesce(median_m2.y, median_m2.x)
   ) %>%
   select(-median_m2.x, -median_m2.y)
 
+# TEST
+db_test <- st_transform(db_test, 4326)
+
+db_test <- st_join(db_test, m2_sf['median_m2'], left = TRUE)
+
+db_test_na <- db_test[is.na(db_test$median_m2), ]
+
+resultados_temp_test <- data.frame(property_id = character(), median_m2 = numeric(), stringsAsFactors = FALSE)
+
+for (u in upl$upl) {
+  nas <- db_test_na %>% filter(upl == u)
+  m2 <- m2_sf %>% filter(upl == u)
+  
+  if (nrow(m2) == 0 | nrow(nas) == 0) next
+  
+  dist_m2 <- st_distance(nas, m2)
+  index_m2 <- apply(dist_m2, 1, which.min)
+  
+  nas_result <- data.frame(
+    property_id = nas$property_id,
+    median_m2 = m2$median_m2[index_m2]
+  )
+  
+  resultados_temp_test <- bind_rows(resultados_temp_test, nas_result)
+}
+
+db_test <- db_test %>%
+  left_join(resultados_temp_test, by = "property_id") %>%
+  mutate(
+    median_m2 = coalesce(median_m2.y, median_m2.x)
+  ) %>%
+  select(-median_m2.x, -median_m2.y)
 ```
 
 
@@ -301,9 +369,9 @@ db_train <- db_train %>%
 
 ```{r}
 ggplot() +
-  geom_sf(data = db_train, color = "red", size = 0.1) +
+  #geom_sf(data = db_train, color = "red", size = 0.1) +
   geom_sf(data = localidades_sf, fill = "lightgray", color = "black", alpha = 0.2) +
-  geom_sf(data = policia_sf, color = "blue", size = 0.1) +
+  geom_sf(data = invasiones_sf, color = "blue", size = 0.1) +
   #geom_sf(data = tm_sf, color = "orange", size = 0.1) +
   #geom_sf(data = sitp_sf, color = "blue", size = 0.1)
   theme_minimal()
@@ -311,19 +379,8 @@ ggplot() +
 ```{r}
 skim(db_train$sitp_100m)
 ```
-
-
-```{r}
-db_train <- db_train %>%
-  st_transform(crs = 3857)
-
-db_train$distancia_policia <- apply(
-  st_distance(db_train, policia_sf_m$geo_shape),
-  1,
-  min
-)
-
-```
+Generación de variables a partir de texto
+TRAIN
 ```{r}
 db_train <- db_train %>%
   mutate(description_clean = stri_trans_general(description, "Latin-ASCII"))
@@ -343,8 +400,7 @@ freq_total <- rowSums(tdm)
 df_freq_total <- as.data.frame(freq_total)
 df_freq_total$word <- rownames(df_freq_total)
 df_freq_total <- df_freq_total[order(-df_freq_total$freq_total),]
-```
-```{r}
+
 parqueadero <- c("parqueadero", "parqueaderos", "garajes", "garaje", "parqueo", "sotano")
 parque <- c("parque", "parques")
 avenidas <- c("vias", "carrera", "avenida", "principales", "autopista", 
@@ -363,4 +419,58 @@ db_train <- db_train %>%
     piscina = if_else(str_detect(description_clean, "piscina"), 1, 0)
     )
 
+rm(corpus)
+rm(dtm)
+rm(tdm)
+rm(df_freq_total)
+```
+TEST
+```{r}
+db_test <- db_test %>%
+  mutate(description_clean = stri_trans_general(description, "Latin-ASCII"))
+
+corpus <- Corpus(VectorSource(db_test$description_clean))
+
+corpus <- tm_map(corpus, content_transformer(tolower))
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, removeNumbers)
+corpus <- tm_map(corpus, removeWords, stopwords('spanish'))
+corpus <- tm_map(corpus, stripWhitespace)
+
+#creación de matriz con palabras
+dtm <-  TermDocumentMatrix(corpus)
+tdm <- as.matrix(dtm)
+freq_total <- rowSums(tdm)
+df_freq_total <- as.data.frame(freq_total)
+df_freq_total$word <- rownames(df_freq_total)
+df_freq_total <- df_freq_total[order(-df_freq_total$freq_total),]
+
+parqueadero <- c("parqueadero", "parqueaderos", "garajes", "garaje", "parqueo", "sotano")
+parque <- c("parque", "parques")
+avenidas <- c("vias", "carrera", "avenida", "principales", "autopista", 
+              "transmilenio", "cra", "boyaca", "cll", "cali", "novena", 
+              "avenidas", "esperanza", "americas", "via", "dorado", "septima",
+              "ochenta", "nqs")
+gimnasio <- c("gimnasio", "gym")
+
+db_test <- db_test %>%
+  mutate(
+    parqueaderos = if_else(str_detect(description_clean, str_c(parqueadero, collapse = "|")), 1, 0),
+    parque = if_else(str_detect(description_clean, str_c(parque, collapse = "|")), 1, 0),
+    avenidas = if_else(str_detect(description_clean, str_c(avenidas, collapse = "|")), 1, 0),
+    gimnasio = if_else(str_detect(description_clean, str_c(gimnasio, collapse = "|")), 1, 0),
+    duplex = if_else(str_detect(description_clean, 'duplex'), 1, 0),
+    piscina = if_else(str_detect(description_clean, "piscina"), 1, 0)
+    )
+
+rm(corpus)
+rm(dtm)
+rm(tdm)
+rm(df_freq_total)
+```
+
+
+```{r}
+write_rds(db_train, file.path(raw_data_path, 'train.rds'))
+write_rds(db_test, file.path(raw_data_path, 'test.rds'))
 ```
