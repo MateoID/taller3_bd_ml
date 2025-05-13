@@ -313,71 +313,71 @@ db_test <- db_test %>%
 
 
 ```{r}
-df_long <- db_train %>%
-  mutate(price = log(price),
-         median_m2 = log(median_m2)) %>% 
-  pivot_longer(cols = c(price, median_m2), names_to = "precios", values_to = "valores")
-
-# Graficar las curvas de densidad
-ggplot(df_long, aes(x = valores, fill = precios)) +
-  geom_density(alpha = 0.5) +
-  labs(title = "Distribuciones de log mediana por manzana y log precios reales",
-       x = "log(precios)",
-       y = "Densidad",
-       fill = "precios") +
-  theme_minimal()
+#df_long <- db_train %>%
+#  mutate(price = log(price),
+#         median_m2 = log(median_m2)) %>% 
+#  pivot_longer(cols = c(price, median_m2), names_to = "precios", values_to = "valores")
+#
+## Graficar las curvas de densidad
+#ggplot(df_long, aes(x = valores, fill = precios)) +
+#  geom_density(alpha = 0.5) +
+#  labs(title = "Distribuciones de log mediana por manzana y log precios reales",
+#       x = "log(precios)",
+#       y = "Densidad",
+#       fill = "precios") +
+#  theme_minimal()
 ```
 Importación de datos de vías e inclusión de características de la vía más cercana a cada vivienda
 ```{r}
-vias <- read_delim(file.path(raw_data_path, 'estado-vias.csv'), 
-  delim = ';', 
-  col_select = c(
-    'Estado de la vías',
-    'Clasificación',
-    'KM_CARRIL',
-    'Geo Shape'
-    ))
-
-names(vias) <- c(
-  'estado_via',
-  'tipo_via',
-  'ancho_via',
-  'geoshape'
-  )
-
-vias <- vias %>% 
-  filter(!is.na(geoshape))
-
-vias <- vias %>% mutate(via_id = row_number())
-
-vias_list <- map(vias$geoshape, geojson_sf)
-vias_sf <- compact(vias_list) %>% bind_rows()
-
-vias_sf <- st_transform(vias_sf, 3857)
-
-dist_matrix_vias <- st_distance(db_train, vias_sf)
-
-db_train <- db_train %>%
-  mutate(via_mts = apply(dist_matrix_vias, 1, min),
-         via_id = apply(dist_matrix_vias, 1, which.min))
-
-db_train <- db_train %>% 
-  left_join(vias %>% select(-geoshape), by=c(via_id)) %>% 
-  select(-via_id)
+#vias <- read_delim(file.path(raw_data_path, 'estado-vias.csv'), 
+#  delim = ';', 
+#  col_select = c(
+#    'Estado de la vías',
+#    'Clasificación',
+#    'KM_CARRIL',
+#    'Geo Shape'
+#    ))
+#
+#names(vias) <- c(
+#  'estado_via',
+#  'tipo_via',
+#  'ancho_via',
+#  'geoshape'
+#  )
+#
+#vias <- vias %>% 
+#  filter(!is.na(geoshape))
+#
+#vias <- vias %>% mutate(via_id = row_number())
+#
+#vias_list <- map(vias$geoshape, geojson_sf)
+#vias_sf <- compact(vias_list) %>% bind_rows()
+#
+#vias_sf <- st_transform(vias_sf, 3857)
+#
+#dist_matrix_vias <- st_distance(db_train, vias_sf)
+#
+#db_train <- db_train %>%
+#  mutate(via_mts = apply(dist_matrix_vias, 1, min),
+#         via_id = apply(dist_matrix_vias, 1, which.min))
+#
+#db_train <- db_train %>% 
+#  left_join(vias %>% select(-geoshape), by=c(via_id)) %>% 
+#  select(-via_id)
 ```
 
 
 ```{r}
-ggplot() +
-  #geom_sf(data = db_train, color = "red", size = 0.1) +
-  geom_sf(data = localidades_sf, fill = "lightgray", color = "black", alpha = 0.2) +
-  geom_sf(data = invasiones_sf, color = "blue", size = 0.1) +
-  #geom_sf(data = tm_sf, color = "orange", size = 0.1) +
-  #geom_sf(data = sitp_sf, color = "blue", size = 0.1)
-  theme_minimal()
+#ggplot() +
+#  #geom_sf(data = db_train, color = "red", size = 0.1) +
+#  geom_sf(data = localidades_sf, fill = "lightgray", color = "black", alpha = 0.2) +
+#  geom_sf(data = invasiones_sf, color = "blue", size = 0.1) +
+#  #geom_sf(data = tm_sf, color = "orange", size = 0.1) +
+#  #geom_sf(data = sitp_sf, color = "blue", size = 0.1)
+#  theme_minimal()
 ```
 ```{r}
-skim(db_train$sitp_100m)
+#skim(db_train$sitp_100m)
 ```
 Generación de variables a partir de texto
 TRAIN

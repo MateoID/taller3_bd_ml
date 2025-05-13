@@ -5,4 +5,6 @@
 
 *.csv
 *gpkg
+data/ValorIntegralm2_Mz/
+data/SHP/
 data/valorintegralm2_greco/
