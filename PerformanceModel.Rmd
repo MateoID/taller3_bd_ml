@@ -1,0 +1,175 @@
+
+```{r}
+library(tidyverse)
+library(sf)
+library(caret)
+library(xgboost)
+library(randomForest)
+library(glmnet)
+library(SuperLearner)
+library(tidytext)
+library(tm)
+library(osmdata)
+library(tmap)
+
+# Cargar datos
+train <- readRDS("./data/train.rds")
+test <- readRDS("./data/test.rds")
+
+# Combinar datos con identificación de conjunto
+data <- bind_rows(train %>% mutate(dataset = "train"),
+                  test %>% mutate(dataset = "test"))
+
+# Crear variables desde texto (title y description)
+data <- data %>% 
+  mutate(
+    lujo = if_else(str_detect(tolower(description_clean), "lujo"), 1, 0),
+    balcon = if_else(str_detect(tolower(description_clean), "balc[oó]n"), 1, 0),
+    remodelado = if_else(str_detect(tolower(description_clean), "remodelad[oa]"), 1, 0),
+    vista = if_else(str_detect(tolower(description_clean), "vista"), 1, 0),
+    terraza = if_else(str_detect(tolower(description_clean), "terraza"), 1, 0)
+  ) %>%
+  # Asegurar que las nuevas variables sean numéricas
+  mutate(across(c(lujo, balcon, remodelado, vista, terraza), as.numeric))
+
+# Obtener datos externos desde OpenStreetMap (parques)
+bogota_bbox <- getbb("Bogotá D.C.")
+osm_parques <- opq(bbox = bogota_bbox) %>%
+  add_osm_feature(key = "leisure", value = "park") %>%
+  osmdata_sf()
+
+# Convertir datos a sf y calcular distancia a parque más cercano
+if(!is.null(osm_parques$osm_polygons)) {
+  parques <- osm_parques$osm_polygons %>% st_transform(4326)
+  data_sf <- st_as_sf(data, crs = 4326)
+  data_sf$dist_parque <- st_distance(data_sf$geometry, parques) %>% 
+    apply(1, min) %>% 
+    as.numeric()
+  data$dist_parque <- data_sf$dist_parque
+} else {
+  data$dist_parque <- NA_real_
+  warning("No se encontraron parques en OSM para el área especificada")
+}
+
+# Imputar valores faltantes
+impute_median <- function(x) {
+  x[is.na(x)] <- median(x, na.rm = TRUE)
+  return(x)
+}
+
+data <- data %>%
+  mutate(across(c(surface_total, rooms, bedrooms, bathrooms, parqueaderos, dist_parque),
+                impute_median))
+```
+
+
+```{r}
+# -------------------------------
+# 7. PREPARACIÓN DE DATOS PARA MODELADO
+# -------------------------------
+# Separar conjuntos eliminando columnas no necesarias
+train <- data %>% 
+  filter(dataset == "train") %>% 
+  select(-geometry, -dataset)
+
+test <- data %>% 
+  filter(dataset == "test") %>% 
+  select(-geometry, -dataset)
+
+# Definir features y verificar disponibilidad
+features <- c("surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos", 
+              "lujo", "balcon", "remodelado", "vista", "terraza", "dist_parque")
+
+available_features <- intersect(features, names(train))
+print(paste("Features usadas:", paste(available_features, collapse = ", ")))
+
+# Función segura para crear matrices
+create_matrix <- function(df) {
+  df %>% 
+    select(all_of(available_features)) %>%
+    mutate(across(everything(), as.numeric)) %>%
+    as.matrix()
+}
+
+X_train <- create_matrix(train)
+y_train <- train$price
+X_test <- create_matrix(test)
+
+# Verificación final
+stopifnot(
+  is.matrix(X_train),
+  all(is.numeric(X_train)),
+  ncol(X_train) == length(available_features)
+)
+```
+
+
+```{r}
+# Modelo XGBoost - con verificación de datos
+if(!all(sapply(X_train, is.numeric))) {
+  stop("Algunas variables en X_train no son numéricas")
+}
+
+set.seed(123)
+dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+dtest <- xgb.DMatrix(data = X_test)
+
+params <- list(
+  objective = "reg:squarederror",
+  eta = 0.1,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.8
+)
+
+xgb_model <- xgb.train(
+  params = params, 
+  data = dtrain, 
+  nrounds = 200, 
+  watchlist = list(train = dtrain), 
+  early_stopping_rounds = 10, 
+  verbose = 1
+)
+
+# Predicciones
+test$pred_price <- predict(xgb_model, newdata = dtest)
+
+# Guardar resultados
+if(!dir.exists("../results/predictions")) {
+  dir.create("../results/predictions", recursive = TRUE)
+}
+write_csv(test %>% select(property_id, pred_price), "../results/predictions/xgb_pred.csv")
+
+# Importancia de variables
+importance <- xgb.importance(feature_names = colnames(X_train), model = xgb_model)
+print(importance)
+
+# Validación cruzada
+ctrl <- trainControl(method = "cv", number = 5)
+cv_model <- train(
+  x = X_train, 
+  y = y_train, 
+  method = "xgbTree", 
+  trControl = ctrl,
+  tuneLength = 3
+)
+print(cv_model)
+
+# SuperLearner (opcional)
+tryCatch({
+  sl <- SuperLearner(
+    Y = y_train, 
+    X = as.data.frame(X_train), 
+    family = gaussian(),
+    SL.library = c("SL.glm", "SL.randomForest", "SL.xgboost"),
+    cvControl = list(V = 3)
+  )
+  
+  preds_sl <- predict(sl, newdata = as.data.frame(X_test))$pred
+  test$pred_price_sl <- preds_sl
+  write_csv(test %>% select(property_id, pred_price_sl), "../results/predictions/superlearner_pred.csv")
+}, error = function(e) {
+  message("Error en SuperLearner: ", e$message)
+})
+```
+
