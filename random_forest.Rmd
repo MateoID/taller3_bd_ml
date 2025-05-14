@@ -1,0 +1,186 @@
+---
+title: "random_forest"
+output: html_document
+date: "2025-05-14"
+---
+
+```{r}
+require(pacman)
+
+p_load(
+  tidyverse,
+  caret,
+  Metrics,
+  ranger
+)
+```
+
+```{r}
+data <- './data'
+train <- read_rds(file.path(data, 'train.rds'))
+test <- read_rds(file.path(data, 'test.rds'))
+```
+
+```{r}
+cols_factor <- c(
+  'year',
+  'property_type',
+  'parqueaderos',
+  'parque',
+  'avenidas',
+  'gimnasio',
+  'duplex',
+  'piscina'
+)
+```
+
+
+```{r}
+train <- train %>% 
+  select(
+    property_id,
+    price,
+    year,
+    property_type,
+    cai_mts,
+    tm_mts,
+    sitp_100m,
+    ciclorutas_mts,
+    invasiones_100m,
+    median_m2,
+    parqueaderos,
+    parque,
+    avenidas,
+    gimnasio,
+    duplex,
+    piscina
+  ) %>%
+  mutate(across(all_of(cols_factor), as.factor)) %>% 
+  as.data.frame()
+
+train <- na.omit(train)
+
+set.seed(1305)
+# Creación de particiones:
+# - 80% para entrenamiento (bd_tr)
+# - 20% para validación (bd_validation)
+# Método createDataPartition de caret preserva la distribución de la variable objetivo
+inTrain <- createDataPartition(
+  y = train$price,     # Variable objetivo
+  p = .80,             # Proporción para entrenamiento
+  list = FALSE
+)
+
+# Filtrado de datos:
+bd_tr <- train %>% filter(row_number() %in% inTrain)       # Conjunto de entrenamiento
+bd_validation  <- train %>% filter(!row_number() %in% inTrain)
+```
+
+```{r}
+required_vars <- c(
+  'year',
+  'property_type',
+  'cai_mts', 
+  'tm_mts',
+  'sitp_100m',
+  'ciclorutas_mts', 
+  'invasiones_100m', 
+  'median_m2', 
+  'parqueaderos', 
+  'parque', 
+  'avenidas', 
+  'gimnasio', 
+  'duplex', 
+  'piscina'
+  )
+
+formula_rhs <- paste(required_vars, collapse = " + ")
+
+especification_forest <- as.formula(paste("price ~", formula_rhs))
+```
+```{r}
+# --- CONFIGURACIÓN DEL MODELO RANDOM FOREST ---
+set.seed(1305)  # Reproducibilidad
+
+# Parámetros de control:
+# - method = "oob": Usa Out-of-Bag error para validación
+fitControl <- trainControl(method = "oob")
+
+# Grid de hiperparámetros:
+# - mtry: 3 a 5 variables por división
+# - splitrule: "gini" (impureza de Gini)
+# - min.node.size: Tamaño mínimo de nodo = 13
+tree_grid <- expand.grid(
+    mtry = 5,
+    splitrule = "variance",
+    min.node.size = c(2, 3, 4)
+)
+
+# Entrenamiento del modelo:
+# - method = "ranger": Implementación eficiente de RF
+# - num.trees = 500: Número de árboles
+# - importance = "impurity": Calcula importancia de variables
+model_forest <- train(
+    especification_forest,        # Fórmula definida previamente
+    data = bd_tr,        # Datos balanceados
+    method = "ranger",  
+    trControl = fitControl,
+    tuneGrid = tree_grid,
+    num.trees = 500,
+    importance = "permutation"
+)
+```
+
+```{r}
+pred <- predict(model_forest, newdata = bd_validation[, required_vars])
+
+bd_validation <- bd_validation %>% 
+  mutate(price_hat = pred)
+
+mae_result1 <- mae(bd_validation$price, bd_validation$price_hat)
+print(mae_result1)
+```
+
+```{r}
+test <- test %>% 
+  select(
+    property_id,
+    year,
+    property_type,
+    cai_mts,
+    tm_mts,
+    sitp_100m,
+    ciclorutas_mts,
+    invasiones_100m,
+    median_m2,
+    parqueaderos,
+    parque,
+    avenidas,
+    gimnasio,
+    duplex,
+    piscina
+  ) %>%
+  mutate(across(c(
+    parqueaderos,
+    parque,
+    avenidas,
+    gimnasio,
+    duplex,
+    piscina
+    ), ~ ifelse(is.na(.), 0, .))) %>% 
+  mutate(across(all_of(cols_factor), as.factor)) %>% 
+  as.data.frame()
+
+test <- test 
+pred <- predict(model_forest, newdata = test)
+
+test <- test %>% 
+  mutate(price = pred) %>% 
+  select(
+    'property_id',
+    'price'
+  )
+```
+```{r}
+write_csv(test, 'RF_mtry_5_minnode_2.csv')
+```
