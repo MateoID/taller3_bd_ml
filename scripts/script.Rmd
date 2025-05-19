@@ -27,7 +27,7 @@ p_load(
 ```
 Carga de bases de datos
 ```{r}
-raw_data_path <- './data'
+raw_data_path <- '../data'
 
 db_train <- read_csv(file.path(raw_data_path, 'train.csv'))
 

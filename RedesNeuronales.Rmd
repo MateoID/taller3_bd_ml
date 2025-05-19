@@ -28,6 +28,9 @@ library(osmdata)
 library(tmap)
 library(text2vec)
 library(irlba)
+library(tensorflow)
+library(keras)
+
 
 clean_text <- function(text) {
   text %>%
@@ -161,19 +164,18 @@ X_test_mat <- as.matrix(X_test)
 y_train <- train_clean$price_millions
 
 # Definir el modelo
-model <- keras_model_sequential()
-model$add(layer_dense(units = 128, activation = "relu", input_shape = c(ncol(X_train_mat))))
-model$add(layer_dropout(rate = 0.3))
-model$add(layer_dense(units = 64, activation = "relu"))
-model$add(layer_dropout(rate = 0.3))
-model$add(layer_dense(units = 32, activation = "relu"))
-model$add(layer_dense(units = 1))
-
+model <- keras_model_sequential() %>%
+  layer_dense(units = 128, activation = "relu", input_shape = c(ncol(X_train_mat))) %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 32, activation = "relu") %>%
+  layer_dense(units = 1)
 
 # Compilar el modelo: usar pérdida MSE y optimizador Adam
-model$compile(
+model %>% compile(
   loss = "mse",
-  optimizer = keras$optimizers$Adam(),
+  optimizer = optimizer_adam(),
   metrics = list("mean_absolute_error")
 )
 
@@ -181,13 +183,13 @@ model$compile(
 summary(model)
 
 # Entrenamiento
-history <- model$fit(
+history <- model %>% keras::fit(
   x = X_train_mat,
   y = y_train,
-  epochs = 100,
+  epochs = 10,
   batch_size = 32,
   validation_split = 0.2,
-  callbacks = list(keras$callbacks$EarlyStopping(monitor = "val_loss", patience = 10, restore_best_weights = TRUE)),
+  callbacks = list(callback_early_stopping(monitor = "val_loss", patience = 10, restore_best_weights = TRUE)),
   verbose = 2
 )
 
@@ -197,34 +199,21 @@ predictions <- model %>% predict(X_test_mat)
 # Puedes revisar las primeras predicciones
 head(predictions)
 ```
-
-
 ```{r}
-# -----------------------------
-# 7. PREDICCIONES EN TEST
-# -----------------------------
-# Predicción en escala log1p
-preds_test <- model %>% predict(X_test_keras) %>% as.vector()
-
-# Volver a la escala original (millones de pesos)
-preds_test_exp <- expm1(preds_test)
-
-# Construir el data.frame final con property_id y predicción
 submission <- data.frame(
   property_id = test_clean$property_id,
-  price = preds_test_exp * 1e6  # volver a pesos colombianos
+  price = as.vector(predictions * 1e6) 
 )
 
-# Guardar como CSV si lo necesitas
-# write_csv(submission, "submission_keras.csv")
+# Guardar el CSV
+write.csv(submission, file = "submission_RN_10epoc.csv", row.names = TRUE)
 
 # Predicciones sobre training
-preds_train <- model %>% predict(X_train_keras) %>% as.vector()
-preds_train_exp <- expm1(preds_train)
+preds_train <- model %>% predict(X_test_mat) %>% as.vector()
+# preds_train_exp <- expm1(preds_train)
 
 # Error absoluto medio (en millones)
-mae <- mean(abs(preds_train_exp - train_clean$price_millions))
+mae <- mean(abs(preds_train - train_clean$price_millions))
 print(paste("MAE en entrenamiento (millones):", round(mae, 2)))
 
 ```
-

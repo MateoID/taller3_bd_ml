@@ -16,7 +16,7 @@ p_load(
 ```
 
 ```{r}
-data <- './data'
+data <- '../data'
 train <- read_rds(file.path(data, 'train.rds'))
 test <- read_rds(file.path(data, 'test.rds'))
 ```
