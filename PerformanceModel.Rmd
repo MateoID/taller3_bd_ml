@@ -68,13 +68,16 @@ data <- data %>%
 # 7. PREPARACIÓN DE DATOS PARA MODELADO
 # -------------------------------
 # Separar conjuntos eliminando columnas no necesarias
+data <- st_drop_geometry(data)  # Esto elimina definitivamente la columna geometry
+
+# 2. Ahora sí podemos eliminar otras columnas normalmente
 train <- data %>% 
   filter(dataset == "train") %>% 
-  select(-geometry, -dataset)
+  select(-dataset)  # Ya no necesitamos select(-geometry) porque st_drop_geometry ya lo hizo
 
 test <- data %>% 
   filter(dataset == "test") %>% 
-  select(-geometry, -dataset)
+  select(-dataset)
 
 # Definir features y verificar disponibilidad
 features <- c("surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos", 
@@ -105,40 +108,66 @@ stopifnot(
 
 
 ```{r}
+
+
 # Modelo XGBoost - con verificación de datos
 if(!all(sapply(X_train, is.numeric))) {
   stop("Algunas variables en X_train no son numéricas")
 }
 
 set.seed(123)
-dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+n <- nrow(X_train)
+idx_train <- sample(seq_len(n), size = 0.8 * n)
+
+X_t <- X_train[idx_train, ]
+y_t <- y_train[idx_train]
+
+X_v <- X_train[-idx_train, ]
+y_v <- y_train[-idx_train]
+
+# Crear DMatrix para entrenamiento y validación
+dtrain <- xgb.DMatrix(data = X_t, label = y_t)
+dvalid <- xgb.DMatrix(data = X_v, label = y_v)
 dtest <- xgb.DMatrix(data = X_test)
 
+y_train_log <- log(y_train + 1)  # +1 para evitar log(0)
+
+# Parámetros ajustados
 params <- list(
   objective = "reg:squarederror",
-  eta = 0.1,
+  eta = 0.01,  # tasa de aprendizaje más baja
   max_depth = 6,
   subsample = 0.8,
-  colsample_bytree = 0.8
+  colsample_bytree = 0.8,
+  lambda = 1.0,  # regularización L2
+  alpha = 0.1    # regularización L1
 )
 
+# Entrenar con más rondas y early stopping
 xgb_model <- xgb.train(
   params = params, 
   data = dtrain, 
-  nrounds = 200, 
-  watchlist = list(train = dtrain), 
-  early_stopping_rounds = 10, 
-  verbose = 1
+  nrounds = 1000,  # más rondas
+  watchlist = list(train = dtrain, eval = dvalid), 
+  early_stopping_rounds = 20,  # paciencia más larga
+  verbose = 1,
+  save_period = NULL
 )
 
 # Predicciones
 test$pred_price <- predict(xgb_model, newdata = dtest)
 
+# Verificar y eliminar duplicados por property_id (nos quedamos con el primero)
+submission <- test %>%
+  distinct(property_id, .keep_all = TRUE) %>%
+  select(property_id, price = pred_price)  # Renombrar la columna a 'price'
+
 # Guardar resultados
 if(!dir.exists("../results/predictions")) {
   dir.create("../results/predictions", recursive = TRUE)
 }
-write_csv(test %>% select(property_id, pred_price), "../results/predictions/xgb_pred.csv")
+
+write_csv(submission, "../results/predictions/xgb_submission.csv")
 
 # Importancia de variables
 importance <- xgb.importance(feature_names = colnames(X_train), model = xgb_model)
@@ -155,21 +184,684 @@ cv_model <- train(
 )
 print(cv_model)
 
-# SuperLearner (opcional)
+
+```
+
+```{r}
+#VERSION 1.0
+
+# -----------------------------
+# 1. LIBRERÍAS
+# -----------------------------
+
+
+library(tidyverse)
+library(xgboost)
+library(Matrix)
+library(caret)
+library(sf)
+library(text2vec)
+
+# -----------------------------
+# 2. PREPROCESAMIENTO
+# -----------------------------
+clean_text <- function(text) {
+  text %>%
+    tolower() %>%
+    str_replace_all("[^[:alnum:] ]", " ") %>%
+    str_squish()
+}
+
+# Dataset combinado
+data <- bind_rows(
+  train %>% mutate(dataset = "train"),
+  test %>% mutate(dataset = "test")
+) %>%
+  mutate(
+    description_clean = clean_text(description),
+    title_clean = clean_text(title),
+    
+    has_balcon = as.numeric(str_detect(description_clean, "balc|terraza")),
+    has_chimenea = as.numeric(str_detect(description_clean, "chimenea")),
+    has_gimnasio = as.numeric(str_detect(description_clean, "gimnasio")),
+    has_piscina = as.numeric(str_detect(description_clean, "piscina")),
+    has_duplex = as.numeric(str_detect(description_clean, "duplex")),
+    
+    surface_total = ifelse(surface_total > 500, NA, surface_total),
+    surface_total = ifelse(is.na(surface_total), median_m2, surface_total),
+    
+    price_millions = price / 1e6,
+    years_since_construction = 2023 - year,
+    rooms_density = rooms / (surface_total + 1),
+    localidad_fct = fct_lump_n(as.factor(localidad), n = 10)
+  )
+
+# Variables para modelar
+features <- c("surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos",
+              "has_balcon", "has_chimenea", "has_gimnasio", "has_piscina", "has_duplex",
+              "years_since_construction", "rooms_density")
+
+# Datos limpios
+# Forzar a data.frame para evitar columnas 'sfc'
+train_clean <- data %>% 
+  filter(dataset == "train") %>% 
+  st_drop_geometry() %>%  # <- elimina columna 'geometry'
+  select(all_of(features), localidad_fct, price_millions) %>%
+  drop_na(price_millions)
+
+test_clean <- data %>% 
+  filter(dataset == "test") %>% 
+  st_drop_geometry() %>%  # <- elimina columna 'geometry'
+  select(all_of(features), localidad_fct, property_id)
+
+
+# Preprocesamiento
+preproc <- preProcess(train_clean[, features], method = c("medianImpute", "center", "scale", "YeoJohnson"))
+X_train <- predict(preproc, train_clean[, features])
+X_test <- predict(preproc, test_clean[, features])
+
+# One-hot encoding
+dummies <- dummyVars(~ localidad_fct, data = train_clean)
+X_train <- cbind(X_train, predict(dummies, train_clean))
+X_test <- cbind(X_test, predict(dummies, test_clean))
+
+# Matrices para XGBoost
+dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = log1p(train_clean$price_millions))
+dtest <- xgb.DMatrix(data = as.matrix(X_test))
+
+# -----------------------------
+# 3. CROSS-VALIDATION & TUNING
+# -----------------------------
+set.seed(42)
+params <- list(
+  booster = "gbtree",
+  eta = 0.02,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.7,
+  objective = "reg:squarederror",
+  eval_metric = "rmse"
+)
+
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 2000,
+  nfold = 5,
+  early_stopping_rounds = 50,
+  print_every_n = 50,
+  maximize = FALSE
+)
+
+best_nrounds <- cv$best_iteration
+
+# -----------------------------
+# 4. ENTRENAR FINAL Y PREDECIR
+# -----------------------------
+final_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+```
+
+
+```{r}
+pred_test <- predict(final_model, dtest)
+pred_test_price <- expm1(pred_test)
+
+# -----------------------------
+# 5. GUARDAR SUBMISSION
+# -----------------------------
+submission <- test_clean %>%
+  select(property_id) %>%
+  mutate(price = pred_test_price)
+
+write_csv(submission, "xgb_submission_low_rmse.csv")
+
+
+# Predecir en test set
+test_pred_log <- predict(final_model, dtest)
+test_pred <- (exp(test_pred_log) - 1) * 1e6  # Convertir a pesos reales
+
+# Asegurar que price sea entero
+submission <- test_clean %>%
+  mutate(price = round(test_pred)) %>%  # redondear a entero
+  select(property_id, price) %>%
+  distinct(property_id, .keep_all = TRUE)
+
+# Guardar CSV final
+write_csv(submission, "submission_kaggle.csv")
+
+
+```
+
+
+```{r}
+# -----------------------------
+# 6. ANÁLISIS DE RESULTADOS EN TRAIN (ESCALA EN PESOS REALES)
+# -----------------------------
+# Predicciones en train
+pred_train_log <- predict(final_model, dtrain)
+pred_train_price <- expm1(pred_train_log) * 1e6  # Escalar a pesos
+real_price <- train_clean$price_millions * 1e6   # Escalar a pesos reales
+
+# RMSE en log-precios
+rmse_log <- sqrt(mean((pred_train_log - log1p(train_clean$price_millions))^2))
+
+# RMSE en precios originales
+rmse_real <- sqrt(mean((pred_train_price - real_price)^2))
+
+# Mostrar resultados
+cat("\n===== EVALUACIÓN EN TRAIN SET =====\n")
+cat("RMSE log1p(price):", round(rmse_log, 4), "\n")
+cat("RMSE price real (COP):", format(round(rmse_real, 0), big.mark = ","), "\n")
+
+# -----------------------------
+# 7. GRÁFICO DE DISPERSIÓN
+# -----------------------------
+library(ggplot2)
+
+df_plot <- tibble(
+  Real = real_price,
+  Predicho = pred_train_price
+)
+
+ggplot(df_plot, aes(x = Real, y = Predicho)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Predicción vs Precio Real (Entrenamiento)",
+       x = "Precio Real (COP)", y = "Precio Predicho (COP)") +
+  theme_minimal()
+
+```
+
+
+```{r}
+# 1. Verificar dimensiones de los datos
+cat("Dimensiones X_train:", dim(X_train), "\n")
+cat("Longitud y_train:", length(y_train), "\n")
+
+# 2. Asegurar coincidencia de filas
+if(nrow(X_train) != length(y_train)) {
+  # Encontrar índices completos
+  complete_rows <- complete.cases(X_train) & !is.na(y_train)
+  
+  # Filtrar datos
+  X_train_clean <- X_train[complete_rows, ]
+  y_train_clean <- y_train[complete_rows]
+  
+  cat("Se eliminaron", sum(!complete_rows), "filas con valores faltantes\n")
+} else {
+  X_train_clean <- X_train
+  y_train_clean <- y_train
+}
+
+# 3. Convertir a data frame (asegurando que no sea matriz)
+X_train_df <- as.data.frame(X_train_clean, stringsAsFactors = FALSE)
+
+# 4. Verificar que no hay problemas en los nombres de las columnas
+names(X_train_df) <- make.names(names(X_train_df), unique = TRUE)
+
+# 5. Ejecutar SuperLearner con validación adicional
 tryCatch({
-  sl <- SuperLearner(
-    Y = y_train, 
-    X = as.data.frame(X_train), 
-    family = gaussian(),
-    SL.library = c("SL.glm", "SL.randomForest", "SL.xgboost"),
-    cvControl = list(V = 3)
+  # Validación previa
+  stopifnot(
+    nrow(X_train_df) == length(y_train_clean),
+    all(sapply(X_train_df, is.numeric)),
+    !any(is.na(X_train_df)),
+    !any(is.na(y_train_clean))
   )
   
-  preds_sl <- predict(sl, newdata = as.data.frame(X_test))$pred
-  test$pred_price_sl <- preds_sl
-  write_csv(test %>% select(property_id, pred_price_sl), "../results/predictions/superlearner_pred.csv")
+  # Configuración de SuperLearner
+  sl_library <- c("SL.glmnet", "SL.ranger", "SL.xgboost", "SL.earth")
+  
+  # Ejecución
+  sl <- SuperLearner(
+    Y = y_train_clean,
+    X = X_train_df,
+    family = gaussian(),
+    SL.library = sl_library,
+    cvControl = list(V = 5, shuffle = TRUE),
+    verbose = TRUE
+  )
+  
+  # Preparar datos de test
+  X_test_df <- as.data.frame(X_test, stringsAsFactors = FALSE)
+  names(X_test_df) <- make.names(names(X_test_df), unique = TRUE)
+  
+  # Predicción
+  test$pred_price_sl <- predict(sl, X_test_df)$pred
+  
+  cor_matrix <- cor(X_train_df)
+  caret::findCorrelation(cor_matrix, cutoff = 0.9)
+  
+  # Guardar resultados
+  if(!dir.exists("../results/predictions")) {
+    dir.create("../results/predictions", recursive = TRUE)
+  }
+  write.csv(test %>% select(property_id, pred_price_sl),
+            "../results/predictions/superlearner_pred.csv",
+            row.names = FALSE)
+  
+  # Resultados
+  print("SuperLearner ejecutado exitosamente!")
+  print(summary(sl))
+  
 }, error = function(e) {
   message("Error en SuperLearner: ", e$message)
+  # Debug adicional
+  if(exists("sl")) print(sl)
 })
+```
+
+```{r}
+#Vresion 2.0
+# -----------------------------
+# 1. LIBRERÍAS Y FUNCIONES
+# -----------------------------
+#install.packages("irlba")
+#install.packages("stopwords")
+
+library(tidyverse)
+library(xgboost)
+library(Matrix)
+library(caret)
+library(sf)
+library(text2vec)
+library(irlba)
+
+clean_text <- function(text) {
+  text %>%
+    tolower() %>%
+    str_replace_all("[^[:alnum:] ]", " ") %>%
+    str_squish()
+}
+
+# -----------------------------
+# 2. UNIFICAR Y PREPROCESAR
+# -----------------------------
+data <- bind_rows(
+  train %>% mutate(dataset = "train"),
+  test %>% mutate(dataset = "test")
+)
+
+stopifnot(all(c("median_m2", "tm_mts", "sitp_100m", "ciclorutas_mts", "parque",
+                "avenidas", "invasiones_100m") %in% names(data)))
+
+data <- data %>%
+  mutate(
+    description_clean = clean_text(description),
+    title_clean = clean_text(title),
+    has_balcon = as.numeric(str_detect(description_clean, "balc|terraza")),
+    has_chimenea = as.numeric(str_detect(description_clean, "chimenea")),
+    has_gimnasio = as.numeric(str_detect(description_clean, "gimnasio")),
+    has_piscina = as.numeric(str_detect(description_clean, "piscina")),
+    has_duplex = as.numeric(str_detect(description_clean, "duplex")),
+    surface_total = ifelse(surface_total > 500, NA, surface_total),
+    surface_total = ifelse(is.na(surface_total), median_m2, surface_total),
+    rooms_density = rooms / (surface_total + 1),
+    covered_ratio = surface_covered / (surface_total + 1),
+    years_since_construction = 2023 - year,
+    transport_score = sitp_100m + tm_mts,
+    environment_score = ciclorutas_mts + avenidas + parque + invasiones_100m,
+    localidad_fct = fct_lump_n(as.factor(localidad), n = 10),
+    price_millions = price / 1e6
+  )
+
+```
+
+```{r}
+# -----------------------------
+# 3. TF-IDF + PCA CON IRLBA
+# -----------------------------
+it <- itoken(data$description_clean, progressbar = FALSE)
+vocab <- create_vocabulary(it, stopwords = stopwords::stopwords("es")) %>%
+  prune_vocabulary(term_count_min = 5)
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it, vectorizer)
+
+# PCA eficiente con 50 componentes
+tfidf <- TfIdf$new()
+dtm_tfidf <- tfidf$fit_transform(dtm)
+tfidf_pca <- prcomp_irlba(dtm_tfidf, n = 50)
+X_text_pca <- as.data.frame(tfidf_pca$x)
+colnames(X_text_pca) <- paste0("text_pca_", 1:ncol(X_text_pca))
+
+data <- bind_cols(data, X_text_pca)
+```
+
+```{r}
+# -----------------------------
+# 4. SEPARAR TRAIN Y TEST
+# -----------------------------
+features <- c("surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos",
+              "has_balcon", "has_chimenea", "has_gimnasio", "has_piscina", "has_duplex",
+              "years_since_construction", "rooms_density", "covered_ratio",
+              "transport_score", "environment_score",
+              paste0("text_pca_", 1:50))
+
+train_clean <- data %>%
+  filter(dataset == "train") %>%
+  st_drop_geometry() %>%
+  select(all_of(features), localidad_fct, price_millions) %>%
+  drop_na(price_millions)
+
+test_clean <- data %>%
+  filter(dataset == "test") %>%
+  st_drop_geometry() %>%
+  select(all_of(features), localidad_fct, property_id)
+```
+
+```{r}
+# -----------------------------
+# 5. PREPROCESAMIENTO NUMÉRICO + OHE
+# -----------------------------
+preproc <- preProcess(train_clean[, features], method = c("medianImpute", "center", "scale", "YeoJohnson"))
+X_train <- predict(preproc, train_clean[, features])
+X_test <- predict(preproc, test_clean[, features])
+
+dummies <- dummyVars(~ localidad_fct, data = train_clean)
+X_train <- cbind(X_train, predict(dummies, train_clean))
+X_test <- cbind(X_test, predict(dummies, test_clean))
+
+# -----------------------------
+# 6. MATRICES PARA XGBOOST
+# -----------------------------
+dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = log1p(train_clean$price_millions))
+dtest <- xgb.DMatrix(data = as.matrix(X_test))
+```
+
+
+```{r}
+# -----------------------------
+# 7. ENTRENAMIENTO CON CROSS-VALIDATION
+# -----------------------------
+set.seed(42)
+params <- list(
+  booster = "gbtree",
+  eta = 0.02,
+  max_depth = 6,
+  subsample = 0.8,
+  colsample_bytree = 0.7,
+  objective = "reg:squarederror",
+  eval_metric = "rmse"
+)
+
+cv <- xgb.cv(
+  params = params,
+  data = dtrain,
+  nrounds = 2000,
+  nfold = 5,
+  early_stopping_rounds = 50,
+  print_every_n = 50,
+  maximize = FALSE
+)
+
+best_nrounds <- cv$best_iteration
+```
+
+```{r}
+# -----------------------------
+# 8. ENTRENAMIENTO FINAL Y PREDICCIÓN
+# -----------------------------
+final_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+
+pred_test <- predict(final_model, dtest)
+pred_test_price <- expm1(pred_test) * 1e6  # Convertir a pesos
+
+# -----------------------------
+# 9. GUARDAR SUBMISSION
+# -----------------------------
+submission <- test_clean %>%
+  mutate(price = round(pred_test_price)) %>%
+  select(property_id, price) %>%
+  distinct(property_id, .keep_all = TRUE)
+
+write_csv(submission, "submission_final_text_pca.csv")
+```
+
+```{r}
+# -----------------------------
+# 10. EVALUACIÓN EN TRAIN
+# -----------------------------
+pred_train_log <- predict(final_model, dtrain)
+pred_train_price <- expm1(pred_train_log) * 1e6
+real_price <- train_clean$price_millions * 1e6
+
+rmse_log <- sqrt(mean((pred_train_log - log1p(train_clean$price_millions))^2))
+rmse_real <- sqrt(mean((pred_train_price - real_price)^2))
+
+cat("\n===== EVALUACIÓN EN TRAIN SET =====\n")
+cat("RMSE log1p(price):", round(rmse_log, 4), "\n")
+cat("RMSE price real (COP):", format(round(rmse_real, 0), big.mark = ","), "\n")
+
+# -----------------------------
+# 11. GRÁFICO
+# -----------------------------
+df_plot <- tibble(Real = real_price, Predicho = pred_train_price)
+ggplot(df_plot, aes(x = Real, y = Predicho)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Predicción vs Precio Real (Entrenamiento)",
+       x = "Precio Real (COP)", y = "Precio Predicho (COP)") +
+  theme_minimal()
+```
+
+```{r}
+library(Metrics)
+
+set.seed(123)
+folds <- createFolds(train_clean$price_millions, k = 5, list = TRUE, returnTrain = FALSE)
+
+rmse_fold <- c()
+
+for (i in seq_along(folds)) {
+  val_idx <- folds[[i]]
+  
+  # Partición de datos
+  X_train_cv <- X_train[-val_idx, ]
+  y_train_cv <- log1p(train_clean$price_millions[-val_idx])
+  
+  X_val_cv <- X_train[val_idx, ]
+  y_val_cv <- train_clean$price_millions[val_idx] * 1e6  # COP reales
+  
+  dtrain_cv <- xgb.DMatrix(data = as.matrix(X_train_cv), label = y_train_cv)
+  dval_cv <- xgb.DMatrix(data = as.matrix(X_val_cv))
+  
+  # Entrenar
+  model_cv <- xgb.train(
+    params = params,
+    data = dtrain_cv,
+    nrounds = best_nrounds,
+    verbose = 0
+  )
+  
+  # Predicción y error
+  pred_log_cv <- predict(model_cv, dval_cv)
+  pred_price_cv <- expm1(pred_log_cv) * 1e6
+  
+  rmse_cv <- rmse(y_val_cv, pred_price_cv)
+  rmse_fold <- c(rmse_fold, rmse_cv)
+  
+  cat("Fold", i, "- RMSE COP:", format(round(rmse_cv, 0), big.mark = ","), "\n")
+}
+
+cat("\n======= ESTIMACIÓN GENERAL =======\n")
+cat("Promedio RMSE en CV (COP):", format(round(mean(rmse_fold), 0), big.mark = ","), "\n")
+cat("Desviación estándar:", format(round(sd(rmse_fold), 0), big.mark = ","), "\n")
+
+```
+
+```{r}
+# Solo si aún no está instalado
+if (!require("ParBayesianOptimization")) install.packages("ParBayesianOptimization")
+library(ParBayesianOptimization)
+
+# Función de evaluación para usar con Bayesian Optimization
+scoringFunction <- function(eta, max_depth, subsample, colsample_bytree, min_child_weight, gamma) {
+  
+  params <- list(
+    booster = "gbtree",
+    eta = eta,
+    max_depth = as.integer(max_depth),
+    subsample = subsample,
+    colsample_bytree = colsample_bytree,
+    min_child_weight = min_child_weight,
+    gamma = gamma,
+    objective = "reg:squarederror",
+    eval_metric = "rmse"
+  )
+  
+  cv <- xgb.cv(
+    params = params,
+    data = dtrain,
+    nrounds = 1000,
+    nfold = 5,
+    early_stopping_rounds = 30,
+    verbose = 0,
+    maximize = FALSE
+  )
+  
+  list(Score = -min(cv$evaluation_log$test_rmse_mean), nrounds = cv$best_iteration)
+}
+
+# Rango de hiperparámetros a explorar
+bounds <- list(
+  eta = c(0.01, 0.3),
+  max_depth = c(3L, 10L),
+  subsample = c(0.6, 1),
+  colsample_bytree = c(0.5, 1),
+  min_child_weight = c(1, 10),
+  gamma = c(0, 5)
+)
+
+# Lanzar la optimización bayesiana
+set.seed(123)
+opt_result <- bayesOpt(
+  FUN = scoringFunction,
+  bounds = bounds,
+  initPoints = 10,
+  iters.n = 30,
+  acq = "ucb",   # función de adquisición (exploration vs exploitation)
+  kappa = 2.576, # confianza para UCB
+  verbose = 1
+)
+
+# Extraer mejores hiperparámetros
+best_params <- getBestPars(opt_result)
+
+# Entrenar modelo final con mejores hiperparámetros
+params_final <- list(
+  booster = "gbtree",
+  eta = best_params$eta,
+  max_depth = as.integer(best_params$max_depth),
+  subsample = best_params$subsample,
+  colsample_bytree = best_params$colsample_bytree,
+  min_child_weight = best_params$min_child_weight,
+  gamma = best_params$gamma,
+  objective = "reg:squarederror",
+  eval_metric = "rmse"
+)
+
+best_nrounds <- opt_result$scoreSummary$nrounds[which.max(opt_result$scoreSummary$Score)]
+
+final_model <- xgb.train(
+  params = params_final,
+  data = dtrain,
+  nrounds = best_nrounds
+)
+
+```
+
+```{r}
+pred_test <- predict(final_model, dtest)
+pred_test_price <- expm1(pred_test) * 1e6  # Convertir a pesos
+
+# -----------------------------
+# 9. GUARDAR SUBMISSION
+# -----------------------------
+submission <- test_clean %>%
+  mutate(price = round(pred_test_price)) %>%
+  select(property_id, price) %>%
+  distinct(property_id, .keep_all = TRUE)
+
+write_csv(submission, "submission_final_text_pca_bayeopt.csv")
+
+pred_train_log <- predict(final_model, dtrain)
+pred_train_price <- expm1(pred_train_log) * 1e6
+real_price <- train_clean$price_millions * 1e6
+
+rmse_log <- sqrt(mean((pred_train_log - log1p(train_clean$price_millions))^2))
+rmse_real <- sqrt(mean((pred_train_price - real_price)^2))
+
+cat("\n===== EVALUACIÓN EN TRAIN SET =====\n")
+cat("RMSE log1p(price):", round(rmse_log, 4), "\n")
+cat("RMSE price real (COP):", format(round(rmse_real, 0), big.mark = ","), "\n")
+
+# -----------------------------
+# 11. GRÁFICO
+# -----------------------------
+df_plot <- tibble(Real = real_price, Predicho = pred_train_price)
+ggplot(df_plot, aes(x = Real, y = Predicho)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "darkred") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Predicción vs Precio Real (Entrenamiento)",
+       x = "Precio Real (COP)", y = "Precio Predicho (COP)") +
+  theme_minimal()
+```
+```{r}
+library(Metrics)
+
+set.seed(123)
+folds <- createFolds(train_clean$price_millions, k = 2, list = TRUE, returnTrain = FALSE)
+
+rmse_fold <- c()
+
+for (i in seq_along(folds)) {
+  val_idx <- folds[[i]]
+  
+  # Partición de datos
+  X_train_cv <- X_train[-val_idx, ]
+  y_train_cv <- log1p(train_clean$price_millions[-val_idx])
+  
+  X_val_cv <- X_train[val_idx, ]
+  y_val_cv <- train_clean$price_millions[val_idx] * 1e6  # COP reales
+  
+  dtrain_cv <- xgb.DMatrix(data = as.matrix(X_train_cv), label = y_train_cv)
+  dval_cv <- xgb.DMatrix(data = as.matrix(X_val_cv))
+  
+  # Entrenar
+  model_cv <- xgb.train(
+    params = params,
+    data = dtrain_cv,
+    nrounds = best_nrounds,
+    verbose = 0
+  )
+  
+  # Predicción y error
+  pred_log_cv <- predict(model_cv, dval_cv)
+  pred_price_cv <- expm1(pred_log_cv) * 1e6
+  
+  rmse_cv <- rmse(y_val_cv, pred_price_cv)
+  rmse_fold <- c(rmse_fold, rmse_cv)
+  
+  cat("Fold", i, "- RMSE COP:", format(round(rmse_cv, 0), big.mark = ","), "\n")
+}
+
+cat("\n======= ESTIMACIÓN GENERAL =======\n")
+cat("Promedio RMSE en CV (COP):", format(round(mean(rmse_fold), 0), big.mark = ","), "\n")
+cat("Desviación estándar:", format(round(sd(rmse_fold), 0), big.mark = ","), "\n")
+
 ```
 
