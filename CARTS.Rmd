@@ -1,0 +1,87 @@
+---
+title: "CARTS"
+output: html_document
+---
+
+Configuración inicial
+
+```{r}
+
+require(pacman)
+
+p_load(
+  tidyverse,
+  tidymodels,
+  ggplot2,
+  plotly,
+  leaflet,
+  sf,
+  visdat,
+  geojsonsf,
+  geojsonio,
+  jsonlite,
+  purrr,
+  stringr,
+  tm,
+  stringi,
+  skimr,
+  tidyverse, 
+  rpart, 
+  caret ,  
+  rpart.plot, 
+  Metrics, 
+  MLmetrics, 
+  ipred,  
+  ranger, 
+  themis
+  )
+
+raw_data_path <- './data'
+db_train <- readRDS(file.path(raw_data_path, 'train.rds'))
+db_test <- readRDS(file.path(raw_data_path, 'test.rds'))
+
+# Verificando la estructura de la base de datos 
+str(db_train)  
+head(db_train)
+summary(db_train)
+
+```
+
+# CARTs
+
+## Modelo básico
+
+Entrenando un arbol para regresión con la especificación más sencilla
+
+```{r}
+#Definición de la grilla 
+grid <- expand.grid(cp = seq(0.001, 0.02, by = 0.002))
+
+
+#Especificación sencilla 
+cart_model_1 <- price ~ 
+  rooms + bedrooms + bathrooms + property_type + 
+  localidad + upl + cai_mts + tm_mts + sitp_100m + ciclorutas_mts +
+  invasiones_100m + median_m2 + parqueaderos + parque + avenidas + 
+  gimnasio + duplex + piscina
+
+
+#Entrenamiento del modelo con validación cruzada
+db_modelo1 <- na.omit(db_train)
+modelo_cart_1 <- train(cart_model_1,
+                      data = db_modelo1,
+                      method = "rpart", 
+                      trControl = trainControl(method = 'cv', number = 5),
+                      tuneGrid = grid,
+                      metric = "RMSE")
+
+# Visualiza el mejor hiperparámetro
+modelo_cart_1$bestTune
+
+#Visualización del árbol 
+rpart.plot(modelo_cart_1$finalModel)
+
+#Métricas de validación cruzada
+print(modelo_cart_1)
+
+```
