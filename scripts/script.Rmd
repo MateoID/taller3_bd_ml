@@ -248,6 +248,8 @@ m2_sf <- st_join(m2_sf, upl_sf['upl'], left = TRUE)
 db_train <- st_transform(db_train, 4326)
 
 db_train <- st_join(db_train, m2_sf['median_m2'], left = TRUE)
+db_train <- db_train %>% 
+    distinct(property_id, .keep_all = TRUE)
 
 db_train_na <- db_train[is.na(db_train$median_m2), ]
 
@@ -267,7 +269,7 @@ for (u in upl$upl) {
     median_m2 = m2$median_m2[index_m2]
   )
   
-  resultados_temp_train <- bind_rows(resultados_temp_train, nas_result)
+  resultados_temp_train <- bind_rows(resultados_temp_train, nas_result)    
 }
 
 db_train <- db_train %>%
@@ -281,6 +283,9 @@ db_train <- db_train %>%
 db_test <- st_transform(db_test, 4326)
 
 db_test <- st_join(db_test, m2_sf['median_m2'], left = TRUE)
+
+db_test <- db_test %>% 
+  distinct(property_id, .keep_all = TRUE)
 
 db_test_na <- db_test[is.na(db_test$median_m2), ]
 
@@ -302,6 +307,9 @@ for (u in upl$upl) {
   
   resultados_temp_test <- bind_rows(resultados_temp_test, nas_result)
 }
+
+resultados_temp_test <- resultados_temp_test %>% 
+    distinct(property_id, .keep_all = TRUE)
 
 db_test <- db_test %>%
   left_join(resultados_temp_test, by = "property_id") %>%
