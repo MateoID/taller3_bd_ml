@@ -13,6 +13,7 @@ p_load(
   ggplot2,
   plotly,
   leaflet,
+  osmdata,
   sf,
   visdat,
   geojsonsf,
@@ -318,80 +319,12 @@ db_test <- db_test %>%
   ) %>%
   select(-median_m2.x, -median_m2.y)
 ```
-
-
-```{r}
-#df_long <- db_train %>%
-#  mutate(price = log(price),
-#         median_m2 = log(median_m2)) %>% 
-#  pivot_longer(cols = c(price, median_m2), names_to = "precios", values_to = "valores")
-#
-## Graficar las curvas de densidad
-#ggplot(df_long, aes(x = valores, fill = precios)) +
-#  geom_density(alpha = 0.5) +
-#  labs(title = "Distribuciones de log mediana por manzana y log precios reales",
-#       x = "log(precios)",
-#       y = "Densidad",
-#       fill = "precios") +
-#  theme_minimal()
-```
-Importación de datos de vías e inclusión de características de la vía más cercana a cada vivienda
-```{r}
-#vias <- read_delim(file.path(raw_data_path, 'estado-vias.csv'), 
-#  delim = ';', 
-#  col_select = c(
-#    'Estado de la vías',
-#    'Clasificación',
-#    'KM_CARRIL',
-#    'Geo Shape'
-#    ))
-#
-#names(vias) <- c(
-#  'estado_via',
-#  'tipo_via',
-#  'ancho_via',
-#  'geoshape'
-#  )
-#
-#vias <- vias %>% 
-#  filter(!is.na(geoshape))
-#
-#vias <- vias %>% mutate(via_id = row_number())
-#
-#vias_list <- map(vias$geoshape, geojson_sf)
-#vias_sf <- compact(vias_list) %>% bind_rows()
-#
-#vias_sf <- st_transform(vias_sf, 3857)
-#
-#dist_matrix_vias <- st_distance(db_train, vias_sf)
-#
-#db_train <- db_train %>%
-#  mutate(via_mts = apply(dist_matrix_vias, 1, min),
-#         via_id = apply(dist_matrix_vias, 1, which.min))
-#
-#db_train <- db_train %>% 
-#  left_join(vias %>% select(-geoshape), by=c(via_id)) %>% 
-#  select(-via_id)
-```
-
-
-```{r}
-#ggplot() +
-#  #geom_sf(data = db_train, color = "red", size = 0.1) +
-#  geom_sf(data = localidades_sf, fill = "lightgray", color = "black", alpha = 0.2) +
-#  geom_sf(data = invasiones_sf, color = "blue", size = 0.1) +
-#  #geom_sf(data = tm_sf, color = "orange", size = 0.1) +
-#  #geom_sf(data = sitp_sf, color = "blue", size = 0.1)
-#  theme_minimal()
-```
-```{r}
-#skim(db_train$sitp_100m)
-```
 Generación de variables a partir de texto
 TRAIN
 ```{r}
 db_train <- db_train %>%
-  mutate(description_clean = stri_trans_general(description, "Latin-ASCII"))
+  mutate(description_clean = stri_trans_general(description, "Latin-ASCII")) %>% 
+  mutate(description_clean = ifelse(is.na(description_clean), '', description_clean))
 
 corpus <- Corpus(VectorSource(db_train$description_clean))
 
@@ -417,6 +350,18 @@ avenidas <- c("vias", "carrera", "avenida", "principales", "autopista",
               "ochenta", "nqs")
 gimnasio <- c("gimnasio", "gym")
 
+cols_to_factor <- c(
+  'property_type',
+  'parqueaderos', 
+  'parque', 
+  'avenidas', 
+  'gimnasio', 
+  'duplex', 
+  'piscina',
+  'desposito',
+  'terraza'
+  )
+
 db_train <- db_train %>%
   mutate(
     parqueaderos = if_else(str_detect(description_clean, str_c(parqueadero, collapse = "|")), 1, 0),
@@ -424,18 +369,23 @@ db_train <- db_train %>%
     avenidas = if_else(str_detect(description_clean, str_c(avenidas, collapse = "|")), 1, 0),
     gimnasio = if_else(str_detect(description_clean, str_c(gimnasio, collapse = "|")), 1, 0),
     duplex = if_else(str_detect(description_clean, 'duplex'), 1, 0),
-    piscina = if_else(str_detect(description_clean, "piscina"), 1, 0)
+    piscina = if_else(str_detect(description_clean, "piscina"), 1, 0),
+    desposito = if_else(str_detect(description_clean, "desposito"), 1, 0),
+    terraza = if_else(str_detect(description_clean, "terraza"), 1, 0),
+    across(all_of(cols_to_factor), as.factor)
     )
 
 rm(corpus)
 rm(dtm)
 rm(tdm)
+rm(freq_total)
 rm(df_freq_total)
 ```
 TEST
 ```{r}
 db_test <- db_test %>%
-  mutate(description_clean = stri_trans_general(description, "Latin-ASCII"))
+  mutate(description_clean = stri_trans_general(description, "Latin-ASCII")) %>% 
+  mutate(description_clean = ifelse(is.na(description_clean), '', description_clean))
 
 corpus <- Corpus(VectorSource(db_test$description_clean))
 
@@ -468,7 +418,10 @@ db_test <- db_test %>%
     avenidas = if_else(str_detect(description_clean, str_c(avenidas, collapse = "|")), 1, 0),
     gimnasio = if_else(str_detect(description_clean, str_c(gimnasio, collapse = "|")), 1, 0),
     duplex = if_else(str_detect(description_clean, 'duplex'), 1, 0),
-    piscina = if_else(str_detect(description_clean, "piscina"), 1, 0)
+    piscina = if_else(str_detect(description_clean, "piscina"), 1, 0),
+    desposito = if_else(str_detect(description_clean, "desposito"), 1, 0),
+    terraza = if_else(str_detect(description_clean, "terraza"), 1, 0),
+    across(all_of(cols_to_factor), as.factor)
     )
 
 rm(corpus)
@@ -476,7 +429,174 @@ rm(dtm)
 rm(tdm)
 rm(df_freq_total)
 ```
+Imputacion de valores a baños
+```{r}
+# TRAIN
+db_train <- db_train %>%
+  mutate(
+    # Identificación de cantidad de apariciones de las palabras baños, baño, banos, bano, baos, bao en cada descripción
+    bath_clean = str_count(description_clean, '\\b(baños|baño|banos|bano|baos|bao)\\b'),
+    bath_clean = ifelse(bath_clean == 0, 1, bath_clean),
+    bath_clean = ifelse(is.na(bathrooms), bath_clean, bathrooms),
+    # Identificación de la cifra que antecede a la primera aparicion de baños, banos, baos en cada descripción
+    bath_clean2 = str_extract(description_clean, "\\b\\w+\\b(?=\\s*(baños|banos|baos)\\b)"),
+    bath_clean2 = ifelse(is.na(bath_clean2), "1", bath_clean2),
+    bath_clean2 = case_when(str_detect(bath_clean2, '^[0-9]+$') ~ bath_clean2,
+                           str_detect(bath_clean2, 'dos') ~ '2',
+                           str_detect(bath_clean2, 'tres') ~ '3',
+                           str_detect(bath_clean2, 'cuatro') ~ '4',
+                           str_detect(bath_clean2, 'cinco') ~ '5',
+                           str_detect(bath_clean2, 'seis') ~ '6',
+                           str_detect(bath_clean2, 'siete') ~ '7',
+                           str_detect(bath_clean2, 'ocho') ~ '8',
+                           str_detect(bath_clean2, 'nueve') ~ '9',
+                           TRUE ~ '1'),
+    bath_clean2 = as.numeric(bath_clean2),
+    bath_clean2 = ifelse(is.na(bathrooms), bath_clean2, bathrooms),
+    # Suma de los valores identificados con los dos metodos anteriores 
+    # (no tiene mucho sentido, pero genera valores más cercanos a los registrados para baños originalmente)
+    bath_clean3 = bath_clean + bath_clean2,
+    bathrooms = ifelse(is.na(bathrooms), bath_clean3, bathrooms)) %>% 
+  select(-c('bath_clean', 'bath_clean2', 'bath_clean3'))
 
+# TEST
+db_test <- db_test %>%
+  mutate(bath_clean = str_count(description_clean, '\\b(baños|baño|banos|bano|baos|bao)\\b'),
+         bath_clean = ifelse(bath_clean == 0, 1, bath_clean),
+         bath_clean = ifelse(is.na(bathrooms), bath_clean, bathrooms),
+         bath_clean2 = str_extract(description_clean, "\\b\\w+\\b(?=\\s*(baños|banos|baos)\\b)"),
+         bath_clean2 = ifelse(is.na(bath_clean2), "1", bath_clean2),
+         bath_clean2 = case_when(str_detect(bath_clean2, '^[0-9]+$') ~ bath_clean2,
+                                str_detect(bath_clean2, 'dos') ~ '2',
+                                str_detect(bath_clean2, 'tres') ~ '3',
+                                str_detect(bath_clean2, 'cuatro') ~ '4',
+                                str_detect(bath_clean2, 'cinco') ~ '5',
+                                str_detect(bath_clean2, 'seis') ~ '6',
+                                str_detect(bath_clean2, 'siete') ~ '7',
+                                str_detect(bath_clean2, 'ocho') ~ '8',
+                                str_detect(bath_clean2, 'nueve') ~ '9',
+                                TRUE ~ '1'),
+         bath_clean2 = as.numeric(bath_clean2),
+         bath_clean2 = ifelse(is.na(bathrooms), bath_clean2, bathrooms),
+         bath_clean3 = bath_clean + bath_clean2,
+         bathrooms = ifelse(is.na(bathrooms), bath_clean3, bathrooms)) %>% 
+  select(-c('bath_clean', 'bath_clean2', 'bath_clean3'))
+```
+Imputación de valores de área construida 
+```{r}
+# TRAIN
+db_train <- db_train %>%
+  mutate(area_clean = str_extract(description_clean, '\\b\\d+(?=\\s*(m2|mts2|metros cuadrados|mts|m|metros)\\b)'),
+         area_clean = ifelse(is.na(surface_covered), area_clean, surface_covered),
+         area_clean = as.numeric(area_clean),
+         area_clean = case_when((area_clean > 999) & (area_clean < 5000) ~ area_clean / 10,
+                                area_clean >= 5000 ~ area_clean / 100,
+                                TRUE ~ area_clean),
+         # Estimación del área a partir de bedrooms * 18 + bathrooms * 5.25 + 23 para sala comedor y cocina 
+         area_imputed = ifelse(is.na(surface_covered), area_clean, surface_covered),
+         area_imputed = ifelse(is.na(area_imputed), (bedrooms * 18 + bathrooms * 5.25 + 23), area_imputed),  
+         surface_covered = ifelse(is.na(surface_covered), area_clean, surface_covered)) %>% 
+  select(-area_clean)
+
+# TEST
+db_test <- db_test %>%
+  mutate(area_clean = str_extract(description_clean, '\\b\\d+(?=\\s*(m2|mts2|metros cuadrados|mts|m|metros)\\b)'),
+         area_clean = ifelse(is.na(surface_covered), area_clean, surface_covered),
+         area_clean = as.numeric(area_clean),
+         area_clean = case_when((area_clean > 999) & (area_clean < 5000) ~ area_clean / 10,
+                                area_clean >= 5000 ~ area_clean / 100,
+                                TRUE ~ area_clean),
+         # Estimación del área a partir de bedrooms * 18 + bathrooms * 5.25 + 23 para sala comedor y cocina 
+         area_imputed = ifelse(is.na(surface_covered), area_clean, surface_covered),
+         area_imputed = ifelse(is.na(area_imputed), (bedrooms * 18 + bathrooms * 5.25 + 23), area_imputed),
+         surface_covered = ifelse(is.na(surface_covered), area_clean, surface_covered)) %>% 
+  select(-area_clean)
+```
+Parques con OSMData
+```{r}
+parques <- opq(bbox = getbb("Bogota")) %>%
+      add_osm_feature(key = "leisure" , value = "park")
+
+parques_sf <- osmdata_sf(parques)
+ 
+parques_geometria <- st_as_sf(parques_sf$osm_polygons)
+  
+parques_geometria <- st_transform(parques_geometria, 3857)
+
+# TRAIN
+db_train <- st_transform(db_train, 3857)
+
+dist_matrix_parques_train <- st_distance(db_train, parques_geometria)
+
+db_train <- db_train %>%
+  mutate(parque_mts = apply(dist_matrix_parques_train, 1, min))
+
+rm(dist_matrix_parques_train)
+
+# TEST
+db_test <- st_transform(db_test, 3857)
+
+dist_matrix_parques_test <- st_distance(db_test, parques_geometria)
+
+db_test <- db_test %>%
+  mutate(parque_mts = apply(dist_matrix_parques_test, 1, min))
+
+rm(dist_matrix_parques_test)
+```
+Universidades con OSMData
+```{r}
+univ <- opq(bbox = getbb("Bogota")) %>%
+      add_osm_feature(key = "amenity" , value = "university")
+
+univ_sf <- osmdata_sf(univ)
+ 
+univ_geometria <- st_as_sf(univ_sf$osm_polygons)
+  
+univ_geometria <- st_transform(univ_geometria, 3857)
+
+# TRAIN
+dist_matrix_univ_train <- st_distance(db_train, univ_geometria)
+
+db_train <- db_train %>%
+  mutate(univ_mts = apply(dist_matrix_univ_train, 1, min))
+
+rm(dist_matrix_univ_train)
+
+# TEST
+dist_matrix_univ_test <- st_distance(db_test, univ_geometria)
+
+db_test <- db_test %>%
+  mutate(univ_mts = apply(dist_matrix_univ_test, 1, min))
+
+rm(dist_matrix_univ_test)
+```
+Hospitales con OSMData
+```{r}
+hospital <- opq(bbox = getbb("Bogota")) %>%
+      add_osm_feature(key = "amenity" , value = "hospital")
+
+hospital_sf <- osmdata_sf(hospital)
+ 
+hospital_geometria <- st_as_sf(hospital_sf$osm_polygons)
+  
+hospital_geometria <- st_transform(hospital_geometria, 3857)
+
+# TRAIN
+dist_matrix_hospital_train <- st_distance(db_train, hospital_geometria)
+
+db_train <- db_train %>%
+  mutate(hospital_mts = apply(dist_matrix_hospital_train, 1, min))
+
+rm(dist_matrix_hospital_train)
+
+# TEST
+dist_matrix_hospital_test <- st_distance(db_test, hospital_geometria)
+
+db_test <- db_test %>%
+  mutate(hospital_mts = apply(dist_matrix_hospital_test, 1, min))
+
+rm(dist_matrix_hospital_test)
+```
 
 ```{r}
 write_rds(db_train, file.path(raw_data_path, 'train.rds'))
