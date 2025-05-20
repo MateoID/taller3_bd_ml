@@ -1,4 +1,3 @@
-
 ```{r}
 library(reticulate)
 
@@ -199,6 +198,7 @@ predictions <- model %>% predict(X_test_mat)
 # Puedes revisar las primeras predicciones
 head(predictions)
 ```
+
 ```{r}
 submission <- data.frame(
   property_id = test_clean$property_id,

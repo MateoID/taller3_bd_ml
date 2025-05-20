@@ -151,7 +151,7 @@ submission_ensemble <- test_clean %>%
 # Exportar
 write_csv(submission_ensemble, "submission_superlearner_ensemble.csv")
 
-cat("✅ Submission guardado como 'submission_superlearner_ensemble.csv'\n")
+cat("submission guardado como 'submission_superlearner_ensemble.csv'\n")
 
 
 ```
