@@ -1,16 +1,33 @@
 ```{r}
-library(reticulate)
-
-conda_create("r-tensorflow", packages = "python=3.11")
-use_condaenv("r-tensorflow", required = TRUE)
-
-py_install(c("tensorflow-macos", "tensorflow-metal", "keras"), pip = TRUE)
-
-library(tensorflow)
-library(keras)
-print(tf$config$list_physical_devices())
+# library(reticulate)
+# 
+# conda_create("r-tensorflow", packages = "python=3.11")
+# use_condaenv("r-tensorflow", required = TRUE)
+# 
+# py_install(c("tensorflow-macos", "tensorflow-metal", "keras"), pip = TRUE)
+# 
+# library(tensorflow)
+# library(keras)
+# print(tf$config$list_physical_devices())
 
 ```
+
+```{r}
+raw_data_path <- './data'
+db_train <- readRDS(file.path(raw_data_path, 'train.rds'))
+db_test <- readRDS(file.path(raw_data_path, 'test.rds'))
+
+# Verificando la estructura de la base de datos 
+str(db_train)  
+head(db_train)
+summary(db_train)
+
+#Modificando variables relevantes 
+db_train$property_type <- as.factor(db_train$property_type)
+db_train$localidad <- as.factor(db_train$localidad)
+db_train$upl <- as.factor(db_train$upl)
+```
+
 
 ```{r}
 
