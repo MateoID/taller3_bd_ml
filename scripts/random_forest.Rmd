@@ -22,25 +22,13 @@ test <- read_rds(file.path(data, 'test.rds'))
 ```
 
 ```{r}
-cols_factor <- c(
-  'year',
-  'property_type',
-  'parqueaderos',
-  'parque',
-  'avenidas',
-  'gimnasio',
-  'duplex',
-  'piscina'
-)
-```
-
-
-```{r}
 train <- train %>% 
   select(
     property_id,
     price,
     year,
+    bedrooms,
+    bathrooms,
     property_type,
     cai_mts,
     tm_mts,
@@ -53,14 +41,19 @@ train <- train %>%
     avenidas,
     gimnasio,
     duplex,
-    piscina
+    piscina,
+    desposito,
+    terraza,
+    area_imputed,
+    parque_mts,
+    univ_mts,
+    hospital_mts
   ) %>%
-  mutate(across(all_of(cols_factor), as.factor)) %>% 
   as.data.frame()
 
 train <- na.omit(train)
 
-set.seed(1305)
+set.seed(1905)
 # Creación de particiones:
 # - 80% para entrenamiento (bd_tr)
 # - 20% para validación (bd_validation)
@@ -79,19 +72,27 @@ bd_validation  <- train %>% filter(!row_number() %in% inTrain)
 ```{r}
 required_vars <- c(
   'year',
+  'bedrooms',
+  'bathrooms',
   'property_type',
-  'cai_mts', 
+  'cai_mts',
   'tm_mts',
   'sitp_100m',
-  'ciclorutas_mts', 
-  'invasiones_100m', 
-  'median_m2', 
-  'parqueaderos', 
-  'parque', 
-  'avenidas', 
-  'gimnasio', 
-  'duplex', 
-  'piscina'
+  'ciclorutas_mts',
+  'invasiones_100m',
+  'median_m2',
+  'parqueaderos',
+  'parque',
+  'avenidas',
+  'gimnasio',
+  'duplex',
+  'piscina',
+  'desposito',
+  'terraza',
+  'area_imputed',
+  'parque_mts',
+  'univ_mts',
+  'hospital_mts'
   )
 
 formula_rhs <- paste(required_vars, collapse = " + ")
@@ -100,7 +101,7 @@ especification_forest <- as.formula(paste("price ~", formula_rhs))
 ```
 ```{r}
 # --- CONFIGURACIÓN DEL MODELO RANDOM FOREST ---
-set.seed(1305)  # Reproducibilidad
+set.seed(1905)  # Reproducibilidad
 
 # Parámetros de control:
 # - method = "oob": Usa Out-of-Bag error para validación
@@ -111,9 +112,9 @@ fitControl <- trainControl(method = "oob")
 # - splitrule: "gini" (impureza de Gini)
 # - min.node.size: Tamaño mínimo de nodo = 13
 tree_grid <- expand.grid(
-    mtry = 5,
+    mtry = 8,
     splitrule = "variance",
-    min.node.size = c(2, 3, 4)
+    min.node.size = 2
 )
 
 # Entrenamiento del modelo:
@@ -122,11 +123,11 @@ tree_grid <- expand.grid(
 # - importance = "impurity": Calcula importancia de variables
 model_forest <- train(
     especification_forest,        # Fórmula definida previamente
-    data = bd_tr,        # Datos balanceados
+    data = bd_tr,                 # Datos balanceados
     method = "ranger",  
     trControl = fitControl,
     tuneGrid = tree_grid,
-    num.trees = 500,
+    num.trees = 1000,
     importance = "permutation"
 )
 ```
@@ -145,7 +146,10 @@ print(mae_result1)
 test <- test %>% 
   select(
     property_id,
+    price,
     year,
+    bedrooms,
+    bathrooms,
     property_type,
     cai_mts,
     tm_mts,
@@ -158,17 +162,14 @@ test <- test %>%
     avenidas,
     gimnasio,
     duplex,
-    piscina
+    piscina,
+    desposito,
+    terraza,
+    area_imputed,
+    parque_mts,
+    univ_mts,
+    hospital_mts
   ) %>%
-  mutate(across(c(
-    parqueaderos,
-    parque,
-    avenidas,
-    gimnasio,
-    duplex,
-    piscina
-    ), ~ ifelse(is.na(.), 0, .))) %>% 
-  mutate(across(all_of(cols_factor), as.factor)) %>% 
   as.data.frame()
 
 test <- test 
@@ -182,5 +183,5 @@ test <- test %>%
   )
 ```
 ```{r}
-write_csv(test, 'RF_mtry_5_minnode_2.csv')
+write_csv(test, 'RF_mtry_8_minnode_2.csv')
 ```
