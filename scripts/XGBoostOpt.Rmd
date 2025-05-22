@@ -1,4 +1,10 @@
+---
+title: "XGBoostOpt"
+output: html_document
+---
+
 ```{r}
+
 # -----------------------------
 # 1. LIBRERIAS Y FUNCIONES
 # -----------------------------
@@ -60,8 +66,8 @@ data <- data %>%
     localidad_fct = fct_lump_n(as.factor(localidad), n = 15),
     price_millions = price / 1e6
   )
-
 ```
+
 
 ```{r}
 it <- itoken(data$description_clean, progressbar = FALSE)
@@ -140,7 +146,7 @@ dtest <- xgb.DMatrix(data = X_test_matrix)
 
 ```{r}
 # -----------------------------
-# 7. XGBOOST CON CROSS-VALIDATION
+# 7. XGBOOST CON CROSS-VALIDATION OPTIMIZANDO MAE
 # -----------------------------
 params <- list(
   booster = "gbtree",
@@ -152,8 +158,8 @@ params <- list(
   gamma = 0.1,
   lambda = 1.5,
   alpha = 0.5,
-  objective = "reg:squarederror",
-  eval_metric = "rmse"
+  objective = "reg:squarederror",  # Sigue siendo adecuado
+  eval_metric = "mae"              # Cambiado de "rmse" a "mae"
 )
 
 set.seed(42)
@@ -164,7 +170,7 @@ cv <- xgb.cv(
   nfold = 5,
   early_stopping_rounds = 50,
   print_every_n = 50,
-  maximize = FALSE
+  maximize = FALSE                 # MAE se minimiza, así que sigue siendo FALSE
 )
 best_nrounds <- cv$best_iteration
 
@@ -174,21 +180,23 @@ best_nrounds <- cv$best_iteration
 final_model <- xgb.train(
   params = params,
   data = dtrain,
-  nrounds = round(best_nrounds * 1.1),
+  nrounds = round(best_nrounds * 1.1),  # Ajuste conservador
   watchlist = list(train = dtrain),
   early_stopping_rounds = 30,
   verbose = 1
 )
 
+# Predicción
 pred_test <- predict(final_model, dtest)
-pred_test_price <- expm1(pred_test) * 1e6
+pred_test_price <- expm1(pred_test) * 1e6  # Inverso de log1p
 
+# Generación de la submission
 submission <- test_clean %>%
-  mutate(price = round(pred_test_price)) %>%
+  mutate(price = pred_test_price) %>%  # Sin redondear
   select(property_id, price) %>%
   distinct(property_id, .keep_all = TRUE)
 
-write_csv(submission, "submission_final_text_pca_v3.csv")
+write_csv(submission, "submission_final_mae_optimized.csv")
 ```
 
 ```{r}
@@ -199,19 +207,29 @@ pred_train_log <- predict(final_model, dtrain)
 pred_train_price <- expm1(pred_train_log) * 1e6
 real_price <- train_clean$price_millions * 1e6
 
+# RMSE
 rmse_log <- sqrt(mean((pred_train_log - log1p(train_clean$price_millions))^2))
 rmse_real <- sqrt(mean((pred_train_price - real_price)^2))
+
+# MAE
+mae_log <- mean(abs(pred_train_log - log1p(train_clean$price_millions)))
+mae_real <- mean(abs(pred_train_price - real_price))
 
 cat("\n===== EVALUACION EN TRAIN SET =====\n")
 cat("RMSE log1p(price):", round(rmse_log, 4), "\n")
 cat("RMSE price real (COP):", format(round(rmse_real, 0), big.mark = ","), "\n")
+cat("MAE log1p(price):", round(mae_log, 4), "\n")
+cat("MAE price real (COP):", format(round(mae_real, 0), big.mark = ","), "\n")
+
 
 # -----------------------------
 # 10. CV MANUAL PARA ESTIMACION FINAL
 # -----------------------------
 set.seed(123)
 folds <- createFolds(train_clean$price_millions, k = 2, list = TRUE, returnTrain = FALSE)
+
 rmse_fold <- c()
+mae_fold <- c()
 
 for (i in seq_along(folds)) {
   val_idx <- folds[[i]]
@@ -234,14 +252,23 @@ for (i in seq_along(folds)) {
   pred_log_cv <- predict(model_cv, dval_cv)
   pred_price_cv <- expm1(pred_log_cv) * 1e6
   
-  rmse_cv <- rmse(y_val_cv, pred_price_cv)
-  rmse_fold <- c(rmse_fold, rmse_cv)
+  # RMSE y MAE
+  rmse_cv <- sqrt(mean((pred_price_cv - y_val_cv)^2))
+  mae_cv <- mean(abs(pred_price_cv - y_val_cv))
   
-  cat("Fold", i, "- RMSE COP:", format(round(rmse_cv, 0), big.mark = ","), "\n")
+  rmse_fold <- c(rmse_fold, rmse_cv)
+  mae_fold <- c(mae_fold, mae_cv)
+
+  cat("Fold", i, "- RMSE COP:", format(round(rmse_cv, 0), big.mark = ","), 
+      " - MAE COP:", format(round(mae_cv, 0), big.mark = ","), "\n")
 }
 
 cat("\n======= ESTIMACION GENERAL =======\n")
 cat("Promedio RMSE en CV (COP):", format(round(mean(rmse_fold), 0), big.mark = ","), "\n")
-cat("Desviacion estandar:", format(round(sd(rmse_fold), 0), big.mark = ","), "\n")
+cat("Desviación estándar RMSE:", format(round(sd(rmse_fold), 0), big.mark = ","), "\n")
+cat("Promedio MAE en CV (COP):", format(round(mean(mae_fold), 0), big.mark = ","), "\n")
+cat("Desviación estándar MAE:", format(round(sd(mae_fold), 0), big.mark = ","), "\n")
 ```
 
+
+```{r}
