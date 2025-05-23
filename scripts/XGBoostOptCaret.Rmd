@@ -3,8 +3,8 @@ title: "XGBoostOpt"
 output: html_document
 ---
 
-```{r}
 
+```{r}
 # -----------------------------
 # 1. LIBRERIAS Y FUNCIONES
 # -----------------------------
@@ -67,7 +67,6 @@ data <- data %>%
     price_millions = price / 1e6
   )
 ```
-
 
 ```{r}
 it <- itoken(data$description_clean, progressbar = FALSE)
@@ -151,16 +150,16 @@ dtest <- xgb.DMatrix(data = X_test_matrix)
 # -----------------------------
 params <- list(
   booster = "gbtree",
-  eta = 0.02,
-  max_depth = 6,
+  eta = 0.02,              # velocidad de aprendizaje
+  max_depth = 4,           # más bajo para reducir overfitting
+  min_child_weight = 10,   # más alto para requerir mínimo de datos en hijos
+  gamma = 0.3,             # penaliza splits con ganancia pequeña
   subsample = 0.85,
   colsample_bytree = 0.8,
-  min_child_weight = 5,
-  gamma = 0.1,
-  lambda = 1.5,
-  alpha = 0.5,
-  objective = "reg:squarederror",  # Sigue siendo adecuado
-  eval_metric = "mae"              # Cambiado de "rmse" a "mae"
+  lambda = 2.0,            # regularización L2 (Ridge)
+  alpha = 1.0,             # regularización L1 (Lasso)
+  objective = "reg:squarederror",
+  eval_metric = "mae"
 )
 
 set.seed(42)
@@ -197,7 +196,7 @@ submission <- test_clean %>%
   select(property_id, price) %>%
   distinct(property_id, .keep_all = TRUE)
 
-write_csv(submission, "submission_final_mae_optimized.csv")
+write_csv(submission, "submission_final_mae_optimized_v2.csv")
 ```
 
 ```{r}
@@ -271,5 +270,3 @@ cat("Promedio MAE en CV (COP):", format(round(mean(mae_fold), 0), big.mark = ","
 cat("Desviación estándar MAE:", format(round(sd(mae_fold), 0), big.mark = ","), "\n")
 ```
 
-
-```{r}
