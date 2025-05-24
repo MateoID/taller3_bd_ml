@@ -52,6 +52,15 @@ data <- data %>%
 # -------------------------------------
 # 3. FEATURE ENGINEERING
 # -------------------------------------
+
+data <- data %>%
+  mutate(
+    ciclorutas_mts = as.numeric(as.character(ciclorutas_mts)),
+    avenidas = as.numeric(as.character(avenidas)),
+    parque = as.numeric(as.character(parque)),
+    invasiones_100m = as.numeric(as.character(invasiones_100m)),
+  )
+
 data <- data %>%
   mutate(
     description_clean = clean_text(description),
@@ -85,15 +94,22 @@ vocab <- create_vocabulary(it, stopwords = stopwords("es")) %>%
 vectorizer <- vocab_vectorizer(vocab)
 dtm <- create_dtm(it, vectorizer)
 
+# 4. TF-IDF y PCA (50 componentes)
 tfidf <- TfIdf$new()
 dtm_tfidf <- tfidf$fit_transform(dtm)
 tfidf_pca <- prcomp_irlba(dtm_tfidf, n = 50)
+
 X_text_pca <- as.data.frame(tfidf_pca$x)
-colnames(X_text_pca) <- paste0("text_pca_", 1:50)
+colnames(X_text_pca) <- paste0("text_pca_", seq_len(ncol(X_text_pca)))
 
+# 5. Asegurar filas y eliminar duplicados si existen
 stopifnot(nrow(data) == nrow(X_text_pca))
+data <- data %>% select(-matches("^text_pca_\\d+"))  # Elimina anteriores si estaban
 data <- bind_cols(data, X_text_pca)
+```
 
+
+```{r}
 # -------------------------------------
 # 5. DIVISIÓN EN TRAIN Y TEST
 # -------------------------------------
@@ -129,6 +145,10 @@ X_test <- cbind(X_test, predict(dummies, test_clean))
 
 X_train <- data.frame(lapply(X_train, as.numeric))
 X_test <- data.frame(lapply(X_test, as.numeric))
+
+# 🔧 Imputar NA que puedan haber quedado
+X_train[is.na(X_train)] <- 0
+X_test[is.na(X_test)] <- 0
 
 y_train <- log1p(train_clean$price_millions)
 ```
@@ -173,6 +193,7 @@ for (i in seq_along(folds)) {
     data = dtrain_lgb, nrounds = 1000, verbose = -1
   )
   preds_test$lgb <- preds_test$lgb + predict(model_lgb, as.matrix(X_test)) / length(folds)
+  
 
   # GLMNET
   model_glm <- cv.glmnet(as.matrix(X_tr), y_tr, alpha = 0.1, nfolds = 5)
