@@ -115,17 +115,54 @@ data <- data %>%
   )
 
 # Distancia mínima a centro de la ciudad (asumiendo coordenada central)
-city_center <- st_sfc(st_point(c(mean(coords[,1]), mean(coords[,2]))), crs = 3857)
+city_center <- st_sfc(st_point(c(mean(data$x_coord), mean(data$y_coord))), crs = 3857)
 data$dist_to_center <- as.numeric(st_distance(data, city_center))
 
-# Densidad local de inmuebles (número en radio 500m)
-radius <- 500
-nn_counts <- FNN::knn.dist(data %>% st_drop_geometry() %>% select(x_coord, y_coord), k = 100)
-# Por simplicidad, aquí calculamos vecinos cercanos con un truco (podría mejorarse)
+# Distancias a puntos clave
+lugares_clave <- tibble::tibble(
+  nombre = c("Zona T", "Usaquén", "Aeropuerto El Dorado", "Centro Internacional"),
+  lon = c(-74.0571, -74.0368, -74.1468, -74.0665),
+  lat = c(4.6668, 4.6920, 4.7016, 4.6097)
+) %>%
+  st_as_sf(coords = c("lon", "lat"), crs = 4326) %>%
+  st_transform(3857)
+
+for (i in 1:nrow(lugares_clave)) {
+  nombre <- gsub(" ", "_", tolower(lugares_clave$nombre[i]))
+  data[[paste0("dist_", nombre)]] <- as.numeric(st_distance(data, lugares_clave[i, ]))
+}
+
+# ===============================
+# 3. VARIABLES DERIVADAS
+# ===============================
 data <- data %>%
-  mutate(local_density_500m = map_dbl(1:nrow(data), function(i){
-    sum((coords[,1] - coords[i,1])^2 + (coords[,2] - coords[i,2])^2 <= radius^2)
-  }))
+  mutate(
+    rooms_per_bathroom = ifelse(bathrooms > 0, rooms / bathrooms, NA),
+    area_per_room = ifelse(rooms > 0, surface_total / rooms, NA),
+    area_per_bathroom = ifelse(bathrooms > 0, surface_total / bathrooms, NA),
+    price_per_sqm = price / surface_total,
+    total_rooms = rooms + bathrooms,
+    log_area = log1p(surface_total),
+    log_price_per_sqm = log1p(price_per_sqm)
+  )
+
+# ===============================
+# 4. PROMEDIOS POR LOCALIDAD
+# ===============================
+data <- data %>%
+  mutate(localidad_fct = as.factor(localidad))
+
+# Solo usa train para calcular los promedios
+mean_price_by_localidad_train <- data %>%
+  filter(dataset == "train") %>%
+  group_by(localidad_fct) %>%
+  summarise(mean_price_localidad = mean(price, na.rm = TRUE)) %>%
+  st_drop_geometry()  # Quita geometría para que `left_join` funcione correctamente
+
+
+data <- data %>%
+  left_join(mean_price_by_localidad_train, by = "localidad_fct")
+
 ```
 
 ```{r}
@@ -168,8 +205,9 @@ features <- c(
   "surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos",
   "has_balcon", "has_chimenea", "has_gimnasio", "has_piscina", "has_duplex",
   "years_since_construction", "rooms_density", "covered_ratio",
-  "transport_score", "environment_score", "dist_to_center", "local_density_500m",
-  paste0("text_pca_", 1:50)
+  "transport_score", "environment_score", "dist_to_center",
+  paste0("text_pca_", 1:50),
+  paste0("dist_", gsub(" ", "_", tolower(lugares_clave$nombre))),"rooms_per_bathroom", "area_per_room", "area_per_bathroom", "total_rooms", "log_area", "mean_price_localidad"
 )
 
 # -----------------------------
@@ -185,7 +223,7 @@ train_clean <- data %>%
 test_clean <- data %>%
   filter(dataset == "test") %>%
   st_drop_geometry() %>%
-  select(all_of(features), localidad_fct, property_id)
+  select(all_of(features), localidad_fct, property_id, x_coord, y_coord)
 ```
 
 ```{r}
@@ -241,12 +279,12 @@ fold_ids <- km$cluster
 params <- list(
   booster = "gbtree",
   eta = 0.01,
-  max_depth = 7,
+  max_depth = 4,
   subsample = 0.85,
   colsample_bytree = 0.8,
   min_child_weight = 5,
-  gamma = 0.1,
-  lambda = 1.5,
+  gamma = 5,
+  lambda = 1,
   alpha = 0.5,
   objective = "reg:squarederror",
   eval_metric = "mae"
@@ -309,18 +347,18 @@ final_model <- xgb.train(
 # -----------------------------
 # 14. PREDICCION Y POST-PROCESAMIENTO
 # -----------------------------
-pred_test_log <- predict(final_model, dtest)
-pred_test_price <- expm1(pred_test_log) * 1e6
+pred_log <- predict(final_model, dtest)
+pred_price <- expm1(pred_log) * 1e6  # Esto es muy importante
 
 # Corrección post-predicción: límite inferior (precio no negativo)
-pred_test_price <- pmax(pred_test_price, 100000) 
+#pred_test_price <- pmax(pred_test_price, 100000) +
 
-submission <- test_clean %>%
-  mutate(price = pred_test_price) %>%
-  select(property_id, price) %>%
-  distinct(property_id, .keep_all = TRUE)
+submission <- data.frame(
+  property_id = test_clean$property_id,
+  price = pred_price
+)
 
-write_csv(submission, "submission_final_mae_optimized_Spatial_DF.csv")
+write_csv(submission, "submission_final_mae_optimized_Spatial_LugaresCercanos_Real.csv")
 
 # -----------------------------
 # 15. EVALUACION FINAL SOBRE TRAIN
