@@ -14,3 +14,5 @@ data/.csv
 
 # Otros
 .sh
+scripts/Prueba_PCA_2.R
+scripts/Prueba_PCA.R
