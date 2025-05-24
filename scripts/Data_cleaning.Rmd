@@ -26,7 +26,10 @@ p_load(
   stringr,
   tm,
   stringi,
-  skimr
+  Matrix,
+  text2vec,
+  irlba,
+  stopwords
   )
 ```
 
@@ -91,10 +94,16 @@ localidades_sf <- bind_rows(localidades_list)
 localidades_sf$localidad <- localidades$localidad
 
 # TRAIN
+db_train$lon_raw <- db_train$lon
+db_train$lat_raw <- db_train$lat
+
 db_train <- st_as_sf(db_train, coords = c('lon', 'lat'), crs = 4326)
 db_train <- st_join(db_train, localidades_sf["localidad"], left = TRUE)
 
 # TEST
+db_test$lon_raw <- db_test$lon
+db_test$lat_raw <- db_test$lat
+
 db_test <- st_as_sf(db_test, coords = c('lon', 'lat'), crs = 4326)
 db_test <- st_join(db_test, localidades_sf["localidad"], left = TRUE)
 ```
@@ -729,19 +738,7 @@ data <- data %>%
 
 ```{r}
 # -----------------------------
-# 1. LIBRERÍAS
-# -----------------------------
-
-library(tidyverse)
-library(xgboost)
-library(Matrix)
-library(caret)
-library(sf)
-library(text2vec)
-library(irlba)
-
-# -----------------------------
-# 3. TF-IDF + PCA CON IRLBA
+# TF-IDF + PCA CON IRLBA
 # -----------------------------
 it <- itoken(data$description_clean, progressbar = FALSE)
 vocab <- create_vocabulary(it, stopwords = stopwords::stopwords("es")) %>%
@@ -761,7 +758,7 @@ data <- bind_cols(data, X_text_pca)
 
 ```{r}
 # -----------------------------
-# 4. SEPARAR TRAIN Y TEST
+# SEPARAR TRAIN Y TEST
 # -----------------------------
 train_clean <- data %>%
   filter(dataset == "train") 
