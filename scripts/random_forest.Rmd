@@ -11,7 +11,11 @@ p_load(
   tidyverse,
   caret,
   Metrics,
-  ranger
+  ranger,
+  spatialsample,
+  tidymodels,
+  sf,
+  yardstick
 )
 ```
 
@@ -23,35 +27,24 @@ test <- read_rds(file.path(data, 'test.rds'))
 
 ```{r}
 train <- train %>% 
-  select(
-    property_id,
-    price,
-    year,
-    bedrooms,
-    bathrooms,
-    property_type,
-    cai_mts,
-    tm_mts,
-    sitp_100m,
-    ciclorutas_mts,
-    invasiones_100m,
-    median_m2,
-    parqueaderos,
-    parque,
-    avenidas,
-    gimnasio,
-    duplex,
-    piscina,
-    desposito,
-    terraza,
-    area_imputed,
-    parque_mts,
-    univ_mts,
-    hospital_mts
-  ) %>%
+  select(-c(
+    'city', 
+    'month', 
+    'surface_total', 
+    'surface_covered', 
+    'rooms', 
+    'operation_type', 
+    'title', 
+    'description', 
+    'geometry',
+    'localidad', 
+    "localidad_fct",
+    'upl', 
+    'description_clean',
+    'dataset',
+    'title_clean'
+            )) %>% 
   as.data.frame()
-
-train <- na.omit(train)
 
 set.seed(1905)
 # Creación de particiones:
@@ -70,34 +63,15 @@ bd_validation  <- train %>% filter(!row_number() %in% inTrain)
 ```
 
 ```{r}
-required_vars <- c(
-  'year',
-  'bedrooms',
-  'bathrooms',
-  'property_type',
-  'cai_mts',
-  'tm_mts',
-  'sitp_100m',
-  'ciclorutas_mts',
-  'invasiones_100m',
-  'median_m2',
-  'parqueaderos',
-  'parque',
-  'avenidas',
-  'gimnasio',
-  'duplex',
-  'piscina',
-  'desposito',
-  'terraza',
-  'area_imputed',
-  'parque_mts',
-  'univ_mts',
-  'hospital_mts'
-  )
+exclusion_vars <- c("price", "property_id", "geometry", "lon_raw", "lat_raw")
 
-formula_rhs <- paste(required_vars, collapse = " + ")
+predictors <- setdiff(names(bd_tr), exclusion_vars)
 
-especification_forest <- as.formula(paste("price ~", formula_rhs))
+# Unir los nombres con "+"
+rhs <- paste(predictors, collapse = " + ")
+
+# Crear la fórmula
+especification_forest <- as.formula(paste("price ~", rhs))
 ```
 ```{r}
 # --- CONFIGURACIÓN DEL MODELO RANDOM FOREST ---
@@ -132,56 +106,113 @@ model_forest <- train(
 )
 ```
 
+
 ```{r}
-pred <- predict(model_forest, newdata = bd_validation[, required_vars])
+# --- CONFIGURACIÓN DEL MODELO RANDOM FOREST CON VALIDACIÓN CRUZADA ESPACIAL ---
+
+# Parámetros de control:
+# - method = "10 fold CV": Usa validación cruzada con 10 folds
+bd_tr_sf <- st_as_sf(
+  bd_tr,
+  coords = c("lon_raw", "lat_raw"),
+  crs = 4326
+)
+
+set.seed(2405)
+block_folds <- spatial_block_cv(bd_tr_sf, v = 10)
+
+receta <-  recipe(especification_forest, data = bd_tr_sf) %>% 
+  step_naomit(all_predictors(), all_outcomes()) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors())  
+
+modelo_rf <- rand_forest(
+  mode = "regression",
+  trees = 1000,
+  mtry = tune(),
+  min_n = ()
+  ) %>% 
+  set_engine(
+    "ranger",
+    splitrule = "variance",
+    importance = "permutation"
+    )
+
+grid <- expand.grid(
+  mtry = c(9, 21, 29, 37),
+  min_n = c(2, 4, 6, 8)
+)
+
+workflow <- workflow() %>%
+  add_model(modelo_rf) %>%
+  add_recipe(receta)
+
+
+tree_grid <- tune_grid(
+  workflow,
+  resamples = block_folds,
+  grid = grid,
+  metrics = metric_set(mae),
+  control = control_grid(save_pred = TRUE)
+)
+
+collect_metrics(tree_grid)
+```
+
+```{r}
+best_params <- select_best(tree_grid, metric = "mae")
+
+final_wf <- finalize_workflow(workflow, best_params)
+
+final_fit <- fit(final_wf, data = train)
+
+final_fit <- workflow %>%
+  fit(data = train)
+```
+
+```{r}
+pred <- predict(final_fit, new_data = bd_validation[, predictors])
 
 bd_validation <- bd_validation %>% 
-  mutate(price_hat = pred)
+  mutate(price_hat = pred$.pred)
 
-mae_result1 <- mae(bd_validation$price, bd_validation$price_hat)
+results_df <- data.frame(
+  truth = bd_validation$price,
+  estimate = bd_validation$price_hat
+)
+
+# Calcular MAE correctamente
+mae_result1 <- mae(bd_validation, truth = price, estimate = price_hat)
 print(mae_result1)
 ```
 
 ```{r}
 test <- test %>% 
-  select(
-    property_id,
-    price,
-    year,
-    bedrooms,
-    bathrooms,
-    property_type,
-    cai_mts,
-    tm_mts,
-    sitp_100m,
-    ciclorutas_mts,
-    invasiones_100m,
-    median_m2,
-    parqueaderos,
-    parque,
-    avenidas,
-    gimnasio,
-    duplex,
-    piscina,
-    desposito,
-    terraza,
-    area_imputed,
-    parque_mts,
-    univ_mts,
-    hospital_mts
-  ) %>%
+  select(-c(
+    'city', 
+    'month', 
+    'surface_total', 
+    'surface_covered', 
+    'rooms', 
+    'operation_type', 
+    'title', 
+    'description', 
+    'geometry',
+    'localidad', 
+    "localidad_fct",
+    'upl', 
+    'description_clean',
+    'dataset',
+    'title_clean'
+            )) %>% 
   as.data.frame()
 
-test <- test 
-pred <- predict(model_forest, newdata = test)
+pred <- predict(final_fit, new_data = test[, predictors])
 
 test <- test %>% 
-  mutate(price = pred) %>% 
-  select(
-    'property_id',
-    'price'
-  )
+  select('property_id') %>% 
+  mutate(price = pred$.pred)
 ```
 ```{r}
-write_csv(test, 'RF_mtry_8_minnode_2.csv')
+write_csv(test, 'RF_mtry_29_minnode_2_cv_10.csv')
 ```
