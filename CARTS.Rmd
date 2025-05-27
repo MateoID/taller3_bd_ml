@@ -45,44 +45,6 @@ str(db_train)
 head(db_train)
 summary(db_train)
 
-#Modificando variables relevantes 
-db_train$property_type <- as.factor(db_train$property_type)
-db_train$localidad <- as.factor(db_train$localidad)
-db_train$upl <- as.factor(db_train$upl)
-
-```
-
-```{r}
-#Pre-procesamiento
-
-#Seleccionamos las variables con missings
-num_vars <- c("surface_total", "surface_covered", "rooms", "bathrooms",
-              "parqueaderos", "parque", "avenidas", "gimnasio", "duplex", "piscina")
-
-cat_vars <- c("title", "description", "description_clean")
-
-#Creación de una version final
-db_train_clean <- db_train
-
-#Imputación con la mediana de las numéricas
-for (var in num_vars) {
-  mediana <- median(db_train_clean[[var]], na.rm = TRUE)
-  db_train_clean[[var]][is.na(db_train_clean[[var]])] <- mediana
-}
-
-#Imputación de categóricas
-for (var in cat_vars) {
-  if (is.factor(db_train_clean[[var]])) {
-    db_train_clean[[var]] <- as.character(db_train_clean[[var]])
-  }
-}
-
-db_train_clean[[var]][is.na(db_train_clean[[var]])] <- "missing"
-
-#Devolver a factor 
-if (var %in% cat_vars & is.factor(db_train_clean[[var]])) {
-    db_train_clean[[var]] <- as.factor(db_train_clean[[var]])
-}
 ```
 
 # CARTs
@@ -93,29 +55,20 @@ Entrenando un arbol para regresión con la especificación más sencilla
 
 ```{r}
 #Definición de la grilla 
-grid <- expand.grid(cp = seq(0.001, 0.1, by = 0.005))
-
-vars_modelo <- c("property_type", "cai_mts", "tm_mts", "sitp_100m", "ciclorutas_mts",
-                 "invasiones_100m", "median_m2", "parqueaderos", "parque", 
-                 "avenidas", "gimnasio", "duplex", "piscina")
-
-cols_to_factor <- c("parqueaderos", "parque", 
-                 "avenidas", "gimnasio", "duplex", "piscina")
-
-db_test <- db_test %>% 
-  mutate(across(all_of(cols_to_factor), ~ ifelse(is.na(.), 0, .)))
+grid <- expand.grid(cp = 0.001)
 
 #Especificación sencilla 
 cart_model_1 <- price ~ 
-  property_type + cai_mts + tm_mts + sitp_100m + ciclorutas_mts +
-  invasiones_100m + median_m2 + parqueaderos + parque + avenidas + 
-  gimnasio + duplex + piscina
-
+  property_type + cai_mts + tm_mts + sitp_100m + ciclorutas_mts + invasiones_100m +   median_m2  + parqueaderos + parque + avenidas  + 
+  gimnasio + duplex + piscina 
+  
 
 #Entrenamiento del modelo con validación cruzada
-db_modelo1 <- na.omit(db_train_clean)
+db_modelo_clean <- db_train %>% 
+  drop_na(all_of(vars_modelo))
+
 modelo_cart_1 <- train(cart_model_1,
-                      data = db_train_clean,
+                      data = db_modelo_clean,
                       method = "rpart", 
                       trControl = trainControl(method = 'cv', number = 5),
                       tuneGrid = grid,
@@ -147,17 +100,17 @@ entrega_1 <- entrega_1 %>%
   distinct(property_id, .keep_all = TRUE)
 
 # Guardar el CSV
-write.csv(entrega_1, file = "predictions/submission_CARTs_cp_001.csv", row.names = TRUE)
+write.csv(entrega_1, file = "submission_CARTs_cp_001.csv", row.names = FALSE)
 ```
 
-## Modelos con interacciones 
+## Modelos con nuevas variables
 
 ```{r}
 
 #Modelo 2 
 
 #Definición de la grilla 
-grid <- expand.grid(cp = seq(0.001, 0.1, by = 0.005))
+grid <- expand.grid(cp = 0.01)
 
 
 #Especificación 2  
@@ -169,17 +122,17 @@ db_train$densidad_servicios <- rowSums(cbind(
   db_train$ciclorutas_mts < 200
 ))
 
-cart_model_1 <- log(price) ~ 
-  rooms + bedrooms + bathrooms + property_type + property_type:localidad
-  localidad + upl + cai_mts + tm_mts + sitp_100m + ciclorutas_mts +
-  invasiones_100m + densidad_servicios + median_m2 + parqueaderos + parque + avenidas + 
-  gimnasio + duplex + piscina
+db_train$log_price <- log(db_train$price)
+
+cart_model_2 <- log_price ~ 
+  property_type + densidad_servicios + median_m2 + parqueaderos + 
+  parque + avenidas + gimnasio + duplex + piscina + desposito + 
+  terraza + univ_mts + hospital_mts + area_imputed
 
 
 #Entrenamiento del modelo con validación cruzada
-db_modelo1 <- na.omit(db_train)
-modelo_cart_1 <- train(cart_model_1,
-                      data = db_modelo1,
+modelo_cart_2 <- train(cart_model_2,
+                      data = db_train,
                       method = "rpart", 
                       trControl = trainControl(method = 'cv', number = 5),
                       tuneGrid = grid,
@@ -188,129 +141,32 @@ modelo_cart_1 <- train(cart_model_1,
 # Visualiza el mejor hiperparámetro
 modelo_cart_1$bestTune
 
-#Visualización del árbol 
-rpart.plot(modelo_cart_1$finalModel)
-
 #Métricas de validación cruzada
 print(modelo_cart_1)
 
 
-entrega <- data.frame(
+db_test$densidad_servicios <- rowSums(cbind(
+  db_test$cai_mts < 500,
+  db_test$tm_mts < 500,
+  db_test$parque == 1,
+  db_test$sitp_100m < 300,
+  db_test$ciclorutas_mts < 200
+))
+
+#Predicción con base de testeo 
+pred_test2 <- predict(modelo_cart_2, db_test)
+pred_test2 <- exp(pred_test2)
+
+#Preparar la submission
+entrega_2 <- data.frame(
   property_id = db_test$property_id,
-  price = as.vector(predictions * 1e6) 
+  price = as.vector(pred_test2) 
 )
 
-# Guardar el CSV
-write.csv(entrega_1, file = "submission_CARTs_.csv", row.names = TRUE)
-
-# Predicciones sobre training
-preds_train <- model %>% predict(X_test_mat) %>% as.vector()
-# preds_train_exp <- expm1(preds_train)
-
-# Error absoluto medio (en millones)
-mae <- mean(abs(preds_train - train_clean$price_millions))
-print(paste("MAE en entrenamiento (millones):", round(mae, 2)))
-```
-
-```{r}
-
-#Modelo 3 
-
-#Definición de la grilla 
-grid <- expand.grid(cp = 0.001)
-
-
-#Especificación sencilla 
-cart_model_1 <- price ~ 
-  rooms + bedrooms + bathrooms + property_type + 
-  localidad + upl + cai_mts + tm_mts + sitp_100m + ciclorutas_mts +
-  invasiones_100m + median_m2 + parqueaderos + parque + avenidas + 
-  gimnasio + duplex + piscina
-
-
-#Entrenamiento del modelo con validación cruzada
-db_modelo1 <- na.omit(db_train)
-modelo_cart_1 <- train(cart_model_1,
-                      data = db_modelo1,
-                      method = "rpart", 
-                      trControl = trainControl(method = 'cv', number = 5),
-                      tuneGrid = grid,
-                      metric = "RMSE")
-
-# Visualiza el mejor hiperparámetro
-modelo_cart_1$bestTune
-
-#Visualización del árbol 
-rpart.plot(modelo_cart_1$finalModel)
-
-#Métricas de validación cruzada
-print(modelo_cart_1)
-
-
-entrega <- data.frame(
-  property_id = db_test$property_id,
-  price = as.vector(predictions * 1e6) 
-)
+entrega_2 <- entrega_2 %>%
+  mutate(price = round(price)) %>%
+  distinct(property_id, .keep_all = TRUE)
 
 # Guardar el CSV
-write.csv(entrega_1, file = "submission_CARTs_.csv", row.names = TRUE)
-
-# Predicciones sobre training
-preds_train <- model %>% predict(X_test_mat) %>% as.vector()
-# preds_train_exp <- expm1(preds_train)
-
-# Error absoluto medio (en millones)
-mae <- mean(abs(preds_train - train_clean$price_millions))
-print(paste("MAE en entrenamiento (millones):", round(mae, 2)))
-```
-
-```{r}
-#Modelo 4 
-
-#Definición de la grilla 
-grid <- expand.grid(cp = 0.001)
-
-
-#Especificación sencilla 
-cart_model_1 <- price ~ 
-  rooms + bedrooms + bathrooms + property_type + 
-  localidad + upl + cai_mts + tm_mts + sitp_100m + ciclorutas_mts +
-  invasiones_100m + median_m2 + parqueaderos + parque + avenidas + 
-  gimnasio + duplex + piscina
-
-
-#Entrenamiento del modelo con validación cruzada
-db_modelo1 <- na.omit(db_train)
-modelo_cart_1 <- train(cart_model_1,
-                      data = db_modelo1,
-                      method = "rpart", 
-                      trControl = trainControl(method = 'cv', number = 5),
-                      tuneGrid = grid,
-                      metric = "RMSE")
-
-# Visualiza el mejor hiperparámetro
-modelo_cart_1$bestTune
-
-#Visualización del árbol 
-rpart.plot(modelo_cart_1$finalModel)
-
-#Métricas de validación cruzada
-print(modelo_cart_1)
-
-
-entrega <- data.frame(
-  property_id = db_test$property_id,
-  price = as.vector(predictions * 1e6) 
-)
-
-# Guardar el CSV
-write.csv(entrega_1, file = "submission_CARTs_.csv", row.names = TRUE)
-
-# Predicciones sobre training
-preds_train <- model %>% predict(X_test_mat) %>% as.vector()
-# preds_train_exp <- expm1(preds_train)
-
-# Error absoluto medio (en millones)
-mae <- mean(abs(preds_train - train_clean$price_millions))
-print(paste("MAE en entrenamiento (millones):", round(mae, 2)))
+write.csv(entrega_1, file = "submission_CARTs2_cp_01.csv", row.names = FALSE)
 ```
