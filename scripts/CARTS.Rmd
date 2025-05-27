@@ -33,7 +33,8 @@ p_load(
   MLmetrics, 
   ipred,  
   ranger, 
-  themis
+  themis,
+  yardstick
   )
 
 raw_data_path <- './data'
@@ -49,9 +50,23 @@ summary(db_train)
 
 # CARTs
 
-## Modelo básico
+## Modelo
 
-Entrenando un arbol para regresión con la especificación más sencilla
+Entrenando un arbol para regresión con la especificación
+
+```{r}
+
+#Partición para evaluar el modelo 
+library(caret)
+set.seed(123)
+
+key <- createDataPartition(db_train$price_millions, p = 0.8, list = FALSE)
+
+train_set <- db_train[key, ]
+val_set <- db_train[-key, ]
+
+
+```
 
 ```{r}
 #Definición de la grilla 
@@ -60,15 +75,15 @@ grid <- expand.grid(cp = 0.001)
 #Especificación sencilla 
 cart_model_1 <- price ~ 
   property_type + cai_mts + tm_mts + sitp_100m + ciclorutas_mts + invasiones_100m +   median_m2  + parqueaderos + parque + avenidas  + 
-  gimnasio + duplex + piscina 
+  gimnasio + duplex + piscina + hospital_mts + univ_mts + rooms_density + transport_score
   
 
 #Entrenamiento del modelo con validación cruzada
-db_modelo_clean <- db_train %>% 
-  drop_na(all_of(vars_modelo))
+db_modelo_clean <- train_set %>% 
+  drop_na(all_of(train_set))
 
 modelo_cart_1 <- train(cart_model_1,
-                      data = db_modelo_clean,
+                      data = train_set,
                       method = "rpart", 
                       trControl = trainControl(method = 'cv', number = 5),
                       tuneGrid = grid,
@@ -86,13 +101,31 @@ rpart.plot(modelo_cart_1$finalModel)
 ```
 
 ```{r}
-#Predicción con base de testeo 
-pred_test <- predict(modelo_cart_1, db_test)
+#Predicción con base de validación 
+price_hat <- predict(modelo_cart_1, val_set)
+
+# Añadir predicciones al conjunto de validación
+val_set$price_hat <- price_hat
+
+#Creando el data frame
+resultados <- val_set %>%
+  select(price) %>%
+  mutate(price_hat = price_hat)
+
+# Calcular MAE y RMSE
+mae_result <- mae(resultados, truth = price, estimate = price_hat)
+rmse_result <- rmse(resultados, truth = price, estimate = price_hat)
+
+# Mostrar resultados
+print(mae_result)
+print(rmse_result)
 
 #Preparamos los resultados
+price_test <- predict(modelo_cart_1, db_test)
+
 entrega_1 <- data.frame(
   property_id = db_test$property_id,
-  price = as.vector(pred_test) 
+  price = as.vector(price_test) 
 )
 
 entrega_1 <- entrega_1 %>%
@@ -101,72 +134,4 @@ entrega_1 <- entrega_1 %>%
 
 # Guardar el CSV
 write.csv(entrega_1, file = "submission_CARTs_cp_001.csv", row.names = FALSE)
-```
-
-## Modelos con nuevas variables
-
-```{r}
-
-#Modelo 2 
-
-#Definición de la grilla 
-grid <- expand.grid(cp = 0.01)
-
-
-#Especificación 2  
-db_train$densidad_servicios <- rowSums(cbind(
-  db_train$cai_mts < 500,
-  db_train$tm_mts < 500,
-  db_train$parque == 1,
-  db_train$sitp_100m < 300,
-  db_train$ciclorutas_mts < 200
-))
-
-db_train$log_price <- log(db_train$price)
-
-cart_model_2 <- log_price ~ 
-  property_type + densidad_servicios + median_m2 + parqueaderos + 
-  parque + avenidas + gimnasio + duplex + piscina + desposito + 
-  terraza + univ_mts + hospital_mts + area_imputed
-
-
-#Entrenamiento del modelo con validación cruzada
-modelo_cart_2 <- train(cart_model_2,
-                      data = db_train,
-                      method = "rpart", 
-                      trControl = trainControl(method = 'cv', number = 5),
-                      tuneGrid = grid,
-                      metric = "RMSE")
-
-# Visualiza el mejor hiperparámetro
-modelo_cart_1$bestTune
-
-#Métricas de validación cruzada
-print(modelo_cart_1)
-
-
-db_test$densidad_servicios <- rowSums(cbind(
-  db_test$cai_mts < 500,
-  db_test$tm_mts < 500,
-  db_test$parque == 1,
-  db_test$sitp_100m < 300,
-  db_test$ciclorutas_mts < 200
-))
-
-#Predicción con base de testeo 
-pred_test2 <- predict(modelo_cart_2, db_test)
-pred_test2 <- exp(pred_test2)
-
-#Preparar la submission
-entrega_2 <- data.frame(
-  property_id = db_test$property_id,
-  price = as.vector(pred_test2) 
-)
-
-entrega_2 <- entrega_2 %>%
-  mutate(price = round(price)) %>%
-  distinct(property_id, .keep_all = TRUE)
-
-# Guardar el CSV
-write.csv(entrega_1, file = "submission_CARTs2_cp_01.csv", row.names = FALSE)
 ```
