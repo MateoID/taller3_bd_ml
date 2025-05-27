@@ -1,0 +1,158 @@
+---
+title: "SuperLearner"
+output: html_document
+---
+
+```{r}
+library(xgboost)
+library(randomForest)
+library(glmnet)
+library(caret)
+library(Metrics)
+library(tidyverse)
+
+```
+
+```{r}
+set.seed(123)
+folds <- createFolds(train_clean$price_millions, k = 2, list = TRUE)
+
+# Matrices para almacenar predicciones OOF
+oof_xgb <- rep(NA, nrow(X_train))
+oof_rf <- rep(NA, nrow(X_train))
+oof_glm <- rep(NA, nrow(X_train))
+
+for (i in seq_along(folds)) {
+  cat("Fold", i, "\n")
+  val_idx <- folds[[i]]
+  train_idx <- setdiff(seq_len(nrow(X_train)), val_idx)
+  
+  # Datos
+  X_tr <- as.matrix(X_train[train_idx, ])
+  y_tr <- log1p(train_clean$price_millions[train_idx])
+  X_val <- as.matrix(X_train[val_idx, ])
+  
+  # XGBoost
+  dtrain_fold <- xgb.DMatrix(data = X_tr, label = y_tr)
+  dval_fold <- xgb.DMatrix(data = X_val)
+  
+  model_xgb <- xgb.train(
+    params = params,
+    data = dtrain_fold,
+    nrounds = best_nrounds,
+    verbose = 0
+  )
+  oof_xgb[val_idx] <- predict(model_xgb, dval_fold)
+  
+  # Random Forest
+  model_rf <- randomForest(x = X_tr, y = y_tr, ntree = 200)
+  oof_rf[val_idx] <- predict(model_rf, X_val)
+  
+  # GLMNET (Ridge)
+  model_glm <- cv.glmnet(X_tr, y_tr, alpha = 0)  # alpha = 0 = Ridge
+  oof_glm[val_idx] <- predict(model_glm, newx = X_val, s = "lambda.min")
+}
+
+```
+
+```{r}
+# Combinar predicciones como features para el meta-modelo
+meta_features <- data.frame(
+  xgb = oof_xgb,
+  rf = oof_rf,
+  glm = oof_glm
+)
+
+meta_model <- lm(log1p(train_clean$price_millions) ~ ., data = meta_features)
+summary(meta_model)
+
+```
+
+```{r}
+# Entrenar modelos base con todo el train
+X_full <- as.matrix(X_train)
+y_full <- log1p(train_clean$price_millions)
+X_test_mat <- as.matrix(X_test)
+
+final_xgb <- xgb.train(params = params, data = xgb.DMatrix(X_full, label = y_full), nrounds = best_nrounds)
+final_rf <- randomForest(x = X_full, y = y_full, ntree = 200)
+final_glm <- cv.glmnet(X_full, y_full, alpha = 0)
+
+# Predicciones de cada modelo
+pred_test_xgb <- predict(final_xgb, xgb.DMatrix(X_test_mat))
+pred_test_rf <- predict(final_rf, X_test_mat)
+pred_test_glm <- predict(final_glm, newx = X_test_mat, s = "lambda.min")
+
+# Ensemble
+test_meta <- data.frame(
+  xgb = pred_test_xgb,
+  rf = pred_test_rf,
+  glm_pred = pred_test_glm
+)
+
+meta_features <- data.frame(
+  xgb = oof_xgb,
+  rf = oof_rf,
+  glm_pred = oof_glm
+)
+
+meta_model <- lm(log1p(train_clean$price_millions) ~ ., data = meta_features)
+
+pred_test_ensemble <- predict(meta_model, newdata = test_meta)
+pred_test_price <- expm1(pred_test_ensemble) * 1e6
+
+```
+
+
+```{r}
+submission <- test_clean %>%
+  mutate(price = round(pred_test_price)) %>%
+  select(property_id, price) %>%
+  distinct(property_id, .keep_all = TRUE)
+
+write_csv(submission, "submission_superlearner.csv")
+
+pred_train_price <- expm1(predict(meta_model, newdata = meta_features)) * 1e6
+real_price <- train_clean$price_millions * 1e6
+
+rmse_stack <- rmse(real_price, pred_train_price)
+cat("RMSE SuperLearner (COP):", format(round(rmse_stack, 0), big.mark = ","), "\n")
+
+
+# En escala logarítmica (log1p)
+cat("RMSE OOF XGB (log):", rmse(log1p(train_clean$price_millions), oof_xgb), "\n")
+cat("RMSE OOF RF  (log):", rmse(log1p(train_clean$price_millions), oof_rf), "\n")
+cat("RMSE OOF GLM (log):", rmse(log1p(train_clean$price_millions), oof_glm), "\n")
+
+ensemble_oof <- predict(meta_model, newdata = meta_features)
+cat("RMSE OOF Ensemble (log):", rmse(log1p(train_clean$price_millions), ensemble_oof), "\n\n")
+
+# En escala real (COP)
+real_price <- train_clean$price_millions * 1e6
+real_oof_xgb <- expm1(oof_xgb) * 1e6
+real_oof_rf  <- expm1(oof_rf)  * 1e6
+real_oof_glm <- expm1(oof_glm) * 1e6
+real_oof_ens <- expm1(ensemble_oof) * 1e6
+
+cat("RMSE OOF XGB (COP):", rmse(real_price, real_oof_xgb), "\n")
+cat("RMSE OOF RF  (COP):", rmse(real_price, real_oof_rf), "\n")
+cat("RMSE OOF GLM (COP):", rmse(real_price, real_oof_glm), "\n")
+cat("RMSE OOF Ensemble (COP):", rmse(real_price, real_oof_ens), "\n")
+
+# Convertir de log a COP reales
+pred_test_ensemble_cop <- expm1(pred_test_ensemble) * 1e6
+
+# Crear submission
+submission_ensemble <- test_clean %>%
+  mutate(price = round(pred_test_ensemble_cop)) %>%
+  select(property_id, price) %>%
+  distinct(property_id, .keep_all = TRUE)
+
+# Exportar
+write_csv(submission_ensemble, "submission_superlearner_ensemble.csv")
+
+cat("submission guardado como 'submission_superlearner_ensemble.csv'\n")
+
+
+```
+

@@ -1,0 +1,248 @@
+---
+title: "ensembleOpt"
+output: html_document
+---
+
+```{r}
+
+install.packages(c("tidyverse", "Matrix", "caret", "glmnet", "Metrics", "lightgbm", "text2vec", "irlba", "stopwords", "sf"))
+
+install.packages("lightgbm")
+
+# -------------------------------------
+# 1. LIBRERÍAS Y FUNCIONES
+# -------------------------------------
+library(tidyverse)
+library(Matrix)
+library(caret)
+library(glmnet)
+library(lightgbm)
+library(xgboost)
+library(text2vec)
+library(irlba)
+library(stopwords)
+library(Metrics)
+library(sf)
+
+# Limpieza básica de texto
+clean_text <- function(text) {
+  text %>%
+    tolower() %>%
+    str_replace_all("[^[:alnum:] ]", " ") %>%
+    str_squish()
+}
+
+# -------------------------------------
+# 2. CARGA Y UNIFICACIÓN DE DATOS
+# -------------------------------------
+train <- readRDS("../data/train.rds")
+test <- readRDS("../data/test.rds")
+
+data <- bind_rows(
+  train %>% mutate(dataset = "train"),
+  test %>% mutate(dataset = "test")
+)
+
+# Filtrar outliers extremos solo en train
+q_low <- quantile(train$price, 0.005)
+q_high <- quantile(train$price, 0.995)
+data <- data %>%
+  filter(price >= q_low & price <= q_high | is.na(price))
+
+# -------------------------------------
+# 3. FEATURE ENGINEERING
+# -------------------------------------
+
+data <- data %>%
+  mutate(
+    ciclorutas_mts = as.numeric(as.character(ciclorutas_mts)),
+    avenidas = as.numeric(as.character(avenidas)),
+    parque = as.numeric(as.character(parque)),
+    invasiones_100m = as.numeric(as.character(invasiones_100m)),
+  )
+
+data <- data %>%
+  mutate(
+    description_clean = clean_text(description),
+    title_clean = clean_text(title),
+    full_text = paste(title_clean, description_clean),
+    has_balcon = as.numeric(str_detect(description_clean, "balc|terraza")),
+    has_chimenea = as.numeric(str_detect(description_clean, "chimenea")),
+    has_gimnasio = as.numeric(str_detect(description_clean, "gimnasio")),
+    has_piscina = as.numeric(str_detect(description_clean, "piscina")),
+    has_duplex = as.numeric(str_detect(description_clean, "duplex")),
+    surface_total = ifelse(surface_total > 500, NA, surface_total),
+    surface_total = ifelse(is.na(surface_total), median(surface_total, na.rm = TRUE), surface_total),
+    rooms_density = rooms / (surface_total + 1),
+    covered_ratio = surface_covered / (surface_total + 1),
+    rooms_per_bathroom = rooms / (bathrooms + 1),
+    years_since_construction = 2023 - year,
+    transport_score = sitp_100m + tm_mts,
+    environment_score = ciclorutas_mts + avenidas + parque + invasiones_100m,
+    price_millions = price / 1e6,
+    localidad_fct = fct_lump_n(as.factor(localidad), n = 15)
+  )
+```
+
+```{r}
+# -------------------------------------
+# 4. TF-IDF + PCA SOBRE TEXTO
+# -------------------------------------
+it <- itoken(data$description_clean, progressbar = FALSE)
+vocab <- create_vocabulary(it, stopwords = stopwords("es")) %>%
+  prune_vocabulary(term_count_min = 5)
+vectorizer <- vocab_vectorizer(vocab)
+dtm <- create_dtm(it, vectorizer)
+
+# 4. TF-IDF y PCA (50 componentes)
+tfidf <- TfIdf$new()
+dtm_tfidf <- tfidf$fit_transform(dtm)
+tfidf_pca <- prcomp_irlba(dtm_tfidf, n = 50)
+
+X_text_pca <- as.data.frame(tfidf_pca$x)
+colnames(X_text_pca) <- paste0("text_pca_", seq_len(ncol(X_text_pca)))
+
+# 5. Asegurar filas y eliminar duplicados si existen
+stopifnot(nrow(data) == nrow(X_text_pca))
+data <- data %>% select(-matches("^text_pca_\\d+"))  # Elimina anteriores si estaban
+data <- bind_cols(data, X_text_pca)
+```
+
+
+```{r}
+# -------------------------------------
+# 5. DIVISIÓN EN TRAIN Y TEST
+# -------------------------------------
+features <- c(
+  "surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos",
+  "has_balcon", "has_chimenea", "has_gimnasio", "has_piscina", "has_duplex",
+  "years_since_construction", "rooms_density", "covered_ratio",
+  "transport_score", "environment_score",
+  paste0("text_pca_", 1:50)
+)
+
+train_clean <- data %>%
+  filter(dataset == "train") %>%
+  st_drop_geometry() %>%
+  select(all_of(features), localidad_fct, price_millions) %>%
+  drop_na(price_millions)
+
+test_clean <- data %>%
+  filter(dataset == "test") %>%
+  st_drop_geometry() %>%
+  select(all_of(features), localidad_fct, property_id)
+
+# -------------------------------------
+# 6. PREPROCESAMIENTO NUMÉRICO + OHE
+# -------------------------------------
+preproc <- preProcess(train_clean[, features], method = c("medianImpute", "center", "scale", "YeoJohnson"))
+X_train <- predict(preproc, train_clean[, features])
+X_test <- predict(preproc, test_clean[, features])
+
+dummies <- dummyVars(~ localidad_fct, data = train_clean)
+X_train <- cbind(X_train, predict(dummies, train_clean))
+X_test <- cbind(X_test, predict(dummies, test_clean))
+
+X_train <- data.frame(lapply(X_train, as.numeric))
+X_test <- data.frame(lapply(X_test, as.numeric))
+
+# 🔧 Imputar NA que puedan haber quedado
+X_train[is.na(X_train)] <- 0
+X_test[is.na(X_test)] <- 0
+
+y_train <- log1p(train_clean$price_millions)
+```
+
+
+```{r}
+# -------------------------------------
+# 7. VALIDACIÓN CRUZADA ENSEMBLE
+# -------------------------------------
+set.seed(123)
+folds <- createFolds(y_train, k = 2)
+preds_test <- list(xgb = rep(0, nrow(X_test)), lgb = rep(0, nrow(X_test)), glm = rep(0, nrow(X_test)))
+weights <- c(xgb = 0.5, lgb = 0.3, glm = 0.2)
+
+rmse_fold <- c()
+mae_fold <- c()
+
+for (i in seq_along(folds)) {
+  idx <- folds[[i]]
+  X_tr <- X_train[-idx, ]; y_tr <- y_train[-idx]
+  X_val <- X_train[idx, ]; y_val <- train_clean$price_millions[idx] * 1e6
+
+  # XGBoost
+  dtrain <- xgb.DMatrix(data = as.matrix(X_tr), label = y_tr)
+  dval <- xgb.DMatrix(data = as.matrix(X_val))
+  model_xgb <- xgb.train(
+    params = list(
+      booster = "gbtree", eta = 0.02, max_depth = 6,
+      subsample = 0.85, colsample_bytree = 0.8,
+      min_child_weight = 5, gamma = 0.1,
+      lambda = 1.5, alpha = 0.5,
+      objective = "reg:squarederror", eval_metric = "mae"
+    ),
+    data = dtrain, nrounds = 1000, verbose = 0
+  )
+  preds_test$xgb <- preds_test$xgb + predict(model_xgb, xgb.DMatrix(as.matrix(X_test))) / length(folds)
+
+  # LightGBM
+  dtrain_lgb <- lgb.Dataset(data = as.matrix(X_tr), label = y_tr)
+  model_lgb <- lgb.train(
+    params = list(objective = "regression", metric = "mae", learning_rate = 0.02, num_leaves = 31),
+    data = dtrain_lgb, nrounds = 1000, verbose = -1
+  )
+  preds_test$lgb <- preds_test$lgb + predict(model_lgb, as.matrix(X_test)) / length(folds)
+  
+
+  # GLMNET
+  model_glm <- cv.glmnet(as.matrix(X_tr), y_tr, alpha = 0.1, nfolds = 5)
+  preds_test$glm <- preds_test$glm + predict(model_glm, s = "lambda.min", newx = as.matrix(X_test))[, 1] / length(folds)
+
+  cat("Fold", i, "completado.\n")
+  
+  # Predicción ensemble para el fold
+pred_val_xgb <- predict(model_xgb, xgb.DMatrix(as.matrix(X_val)))
+pred_val_lgb <- predict(model_lgb, as.matrix(X_val))
+pred_val_glm <- predict(model_glm, s = "lambda.min", newx = as.matrix(X_val))[, 1]
+
+pred_val_ens <- weights["xgb"] * pred_val_xgb +
+                weights["lgb"] * pred_val_lgb +
+                weights["glm"] * pred_val_glm
+
+# Volver a escala original (COP)
+pred_val_cop <- expm1(pred_val_ens) * 1e6
+
+# Ground truth en COP
+y_val_cop <- train_clean$price_millions[idx] * 1e6
+
+# Métricas por fold
+rmse_fold[i] <- rmse(y_val_cop, pred_val_cop)
+mae_fold[i] <- mae(y_val_cop, pred_val_cop)
+}
+
+# -------------------------------------
+# 8. COMBINACIÓN Y SUBMISSION
+# -------------------------------------
+pred_ens <- weights["xgb"] * preds_test$xgb +
+            weights["lgb"] * preds_test$lgb +
+            weights["glm"] * preds_test$glm
+
+submission <- test_clean %>%
+  mutate(price = expm1(pred_ens) * 1e6) %>%
+  select(property_id, price)
+
+write_csv(submission, "submission_ensemble_opt.csv")
+
+cat("\n======= ESTIMACION GENERAL =======\n")
+cat("Promedio RMSE en CV (COP):", format(round(mean(rmse_fold), 0), big.mark = ","), "\n")
+cat("Desviación estándar RMSE:", format(round(sd(rmse_fold), 0), big.mark = ","), "\n")
+cat("Promedio MAE en CV (COP):", format(round(mean(mae_fold), 0), big.mark = ","), "\n")
+cat("Desviación estándar MAE:", format(round(sd(mae_fold), 0), big.mark = ","), "\n")
+
+```
+
+```{r}
+
+```
+

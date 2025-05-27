@@ -1,0 +1,255 @@
+---
+title: "ElasticNet"
+author: "Javier Amaya Nieto"
+date: "2025-05-23"
+output: html_document
+---
+
+
+# Cargando las dependencias
+
+```{r}
+library(tidyverse)
+library(sf)
+library(caret)
+library(xgboost)
+library(randomForest)
+library(glmnet)
+library(SuperLearner)
+library(tidytext)
+library(tm)
+library(osmdata)
+library(tmap)
+
+# Cargar datos
+train <- readRDS("../data/train.rds")
+test <- readRDS("../data/test.rds")
+```
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+library(glmnet)
+library(caret)
+library(dplyr)
+
+# Eliminado la columna de geometria
+predictors <- st_drop_geometry(train)  # Elimina la columna geometry
+
+# Selecciona las variables predictoras que quieres usar, incluyendo las de los temas y manteniendo cai_mts y tm_mts
+predictors <- predictors %>%
+  select(-property_id, -city, -price, -month, -year, -title, -description, -localidad_fct, -upl, -description_clean, -title_clean, -dataset, -price_millions) # Excluye la variable objetivo original y las no predictoras. Nota que ahora excluyo 'localidad_fct' y mantengo 'localidad'
+
+# Normaliza, hace one hot endcoding y convierte a matriz
+matriz_X <- makeX(predictors, fullRank = TRUE, na.impute = TRUE) 
+
+preproc <- preProcess(matriz_X, method = c("center", "scale"))
+matriz_normalizada <- predict(preproc, matriz_X)
+x <- matriz_normalizada
+
+# Define la variable objetivo (logaritmo de price_millions)
+y <- log(train$price_millions)
+
+
+db_train <- cbind(x,y)
+
+db_train <- as.data.frame(db_train)
+
+```
+
+```{r}
+skimr::skim(X)
+```
+
+
+
+```{r}
+# Validación cruzada para encontrar el mejor lambda (para un alpha fijo)
+cv_elastic_net <- cv.glmnet(x, y, alpha = 0.5, nfolds = 3) # nfolds es el número de folds para la validación cruzada
+
+# El mejor lambda se puede encontrar así:
+best_lambda <- cv_elastic_net$lambda.min
+
+# Entrena el modelo final con el mejor lambda
+elastic_net_model <- glmnet(x, y, alpha = 0.5, lambda = best_lambda)
+
+# Obtén los coeficientes del modelo con el mejor lambda
+best_model_coefficients <- coefficients(elastic_net_model, s = best_lambda)
+print(best_model_coefficients)
+
+# También puedes ver la curva de error de la validación cruzada
+plot(cv_elastic_net)
+abline(v = log(best_lambda), lty = 2)
+```
+```{r}
+fitControl <- trainControl( 
+  method = "cv",
+  number = 3)
+
+tune_grid <- expand.grid(
+  alpha=seq(0.008, 0.009, 0.01),
+  lambda=seq(5700, 5900, 50)
+)
+
+model1a <- train(
+  model_form1a,
+  data=bd_modelo1,
+  method='glmnet',
+  trControl=fitControl,
+  tuneGrid=tune_grid
+)
+
+model1a$bestTune
+```
+
+
+# Intento 2
+
+preparación de los datos
+```{r}
+# Definir la fórmula del modelo - ajusta según las variables más relevantes
+model_form <- log(price) ~ 
+  city + surface_total + surface_covered + rooms + bedrooms + bathrooms +
+  property_type + localidad + cai_mts + tm_mts + sitp_100m + ciclorutas_mts +
+  invasiones_100m + median_m2 + parqueaderos + parque + avenidas + gimnasio +
+  duplex + piscina + terraza + parque_mts + univ_mts + hospital_mts + lujo +
+  balcon + remodelado + vista + has_balcon + has_chimenea + has_gimnasio +
+  has_piscina + has_duplex + rooms_density + covered_ratio + years_since_construction +
+  transport_score + environment_score + localidad_fct
+
+# Limpieza de datos (eliminar NA)
+bd_train_clean <- na.omit(train)
+```
+
+```{r}
+# 1. Identificar y manejar factores problemáticos antes del modelado
+check_factor_levels <- function(data) {
+  factor_vars <- sapply(data, is.factor)
+  for(var in names(data)[factor_vars]) {
+    if(length(levels(data[[var]])) < 2) {
+      message(paste("Variable", var, "tiene menos de 2 niveles. Será eliminada."))
+      data[[var]] <- NULL
+    }
+  }
+  return(data)
+}
+
+# 2. Aplicar esta función a tus datos
+bd_train_clean <- check_factor_levels(bd_train_clean)
+
+# 3. Actualizar la fórmula del modelo para incluir solo variables existentes
+# Función para actualizar la fórmula automáticamente
+update_model_form <- function(formula, data) {
+  all_vars <- all.vars(formula)
+  existing_vars <- all_vars[all_vars %in% names(data)]
+  reformulate(existing_vars[-1], existing_vars[1])
+}
+
+model_form_updated <- update_model_form(model_form, bd_train_clean)
+
+```
+
+
+
+Regresión lineal sola
+
+```{r}
+## Configuración común para MAE
+mae_summary <- function(data, lev = NULL, model = NULL) {
+  c(MAE = mean(abs(data$obs - data$pred)),
+    Rsquared = cor(data$obs, data$pred)^2)
+}
+
+fitControl <- trainControl(
+  method = "cv",
+  number = 3,
+  summaryFunction = mae_summary,
+  verboseIter = TRUE
+)
+
+# 4. Regresión Lineal con manejo seguro de factores
+set.seed(1004)
+modelo_lm <- train(
+  model_form_updated,
+  data = bd_train_clean,
+  method = "lm",
+  trControl = fitControl,
+  metric = "MAE",
+  maximize = FALSE,
+  preProcess = c("center", "scale", "nzv", "corr")
+)
+
+# 5. Verificar resultados
+print(modelo_lm$results)
+summary(modelo_lm$finalModel)
+```
+```{r}
+## 2. Elastic Net con MAE
+tune_grid <- expand.grid(
+  alpha = seq(0, 1, by = 0.1),  # De Ridge a Lasso
+  lambda = 10^seq(-4, 0, length = 50)  # Rango de regularización
+)
+
+set.seed(1004)
+modelo_enet <- train(
+  model_form,
+  data = bd_train_clean,
+  method = "glmnet",
+  trControl = fitControl,
+  tuneGrid = tune_grid,
+  metric = "MAE",
+  maximize = FALSE,
+  preProcess = c("center", "scale", "nzv")
+)
+
+# Mejores parámetros y resultados
+print(modelo_enet$bestTune)
+ggplot(modelo_enet) + ggtitle("Tuning Elastic Net")
+
+## Predicciones en test (convertidas a precio real)
+bd_test_clean <- bd_test[complete.cases(bd_test[, all.vars(model_form)[-1]]), ]
+
+if(nrow(bd_test_clean) > 0) {
+  # Predicciones en escala logarítmica
+  bd_test_clean$pred_log_lm <- predict(modelo_lm, newdata = bd_test_clean)
+  bd_test_clean$pred_log_enet <- predict(modelo_enet, newdata = bd_test_clean)
+  
+  # Convertir a precios originales
+  bd_test_clean$pred_price_lm <- exp(bd_test_clean$pred_log_lm)
+  bd_test_clean$pred_price_enet <- exp(bd_test_clean$pred_log_enet)
+  
+  # Calcular MAE si hay precios reales en test
+  if("price" %in% names(bd_test_clean)) {
+    mae_lm <- mean(abs(bd_test_clean$price - bd_test_clean$pred_price_lm))
+    mae_enet <- mean(abs(bd_test_clean$price - bd_test_clean$pred_price_enet))
+    
+    cat("\n=== Comparación de Modelos (MAE en escala original) ===\n")
+    cat("Regresión Lineal MAE:", mae_lm, "\n")
+    cat("Elastic Net MAE:", mae_enet, "\n")
+    
+    # Gráfico comparativo
+    library(ggplot2)
+    ggplot(bd_test_clean, aes(x = price)) +
+      geom_point(aes(y = pred_price_lm, color = "Regresión Lineal"), alpha = 0.5) +
+      geom_point(aes(y = pred_price_enet, color = "Elastic Net"), alpha = 0.5) +
+      geom_abline(intercept = 0, slope = 1, linetype = "dashed") +
+      labs(title = "Comparación de Predicciones",
+           x = "Precio Real", y = "Precio Predicho", color = "Modelo") +
+      theme_minimal() +
+      scale_color_manual(values = c("Regresión Lineal" = "blue", "Elastic Net" = "red"))
+  }
+}
+
+## Exportar resultados
+write.csv(bd_test_clean[, c("property_id", "price", "pred_price_lm", "pred_price_enet")], 
+          "predicciones_precios.csv", row.names = FALSE)
+```
+

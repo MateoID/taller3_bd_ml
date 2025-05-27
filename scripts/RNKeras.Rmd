@@ -1,0 +1,59 @@
+```{r}
+
+#install.packages("keras")
+
+install.packages("keras")
+install.packages("tensorflow")
+install.packages("magrittr")
+
+library(tensorflow)
+install_tensorflow(version = "2.15.0", 
+                   extra_packages = "tensorflow-metal")  # Optimizado para GPU M1/M2
+
+library(keras)
+library(magrittr)
+
+# Usar entorno conda creado previamente
+#install_keras(method = "conda", envname = "r-keras")
+
+# Verificar entorno ARM
+cat("Arquitectura detectada:", Sys.info()[["machine"]], "\n") 
+
+X_train_keras <- as.matrix(X_train)
+X_test_keras <- as.matrix(X_test)
+y_train_keras <- log1p(train_clean$price_millions)  # Igual que en XGBoost
+
+```
+
+```{r}
+
+
+
+model <- keras_model_sequential() %>%
+  layer_dense(units = 128, activation = "relu", input_shape = ncol(X_train_keras)) %>%
+  layer_dropout(rate = 0.3) %>%
+  layer_dense(units = 64, activation = "relu") %>%
+  layer_dropout(rate = 0.2) %>%
+  layer_dense(units = 1)  # Output lineal
+
+model %>% compile(
+  loss = "mse",
+  optimizer = optimizer_adam(learning_rate = 0.001),
+  metrics = list("mean_squared_error")
+)
+```
+
+```{r}
+history <- model$fit(
+  x = X_train_keras,
+  y = y_train_keras,
+  epochs = 100,
+  batch_size = 64,
+  validation_split = 0.2,
+  callbacks = list(
+    callback_early_stopping(patience = 10, restore_best_weights = TRUE)
+  )
+)
+
+```
+
