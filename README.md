@@ -1,8 +1,8 @@
 # Integrantes
-María Camila Caraballo - 201613424 - mc.caraballo@uniandes.edu.co
-Javier Amaya Nieto - 202214392 - j.amayan@uniandes.edu.co
-Mateo Isaza Díaz - 202412526 - m.isazad@uniandes.edu.co
-Nicolás Moreno Enriquez - 201615907 - na.morenoe@uniandes.edu.co
+** María Camila Caraballo - 201613424 - mc.caraballo@uniandes.edu.co
+** Javier Amaya Nieto - 202214392 - j.amayan@uniandes.edu.co
+** Mateo Isaza Díaz - 202412526 - m.isazad@uniandes.edu.co
+** Nicolás Moreno Enriquez - 201615907 - na.morenoe@uniandes.edu.co
 # Propósito
 Responder a los planteamientos del problem set 3 del curso de Big data y Machine learning 2025-1.
 # Introducción
@@ -21,7 +21,8 @@ Falta
 
 Falta organizarlo 
 
-taller_3_bd_ml/
+```plaintext
+taller_2_bdml/
 ├───data
 │   ├── bd_test_limpia.csv
 │   ├── bd_train_limpia.csv
@@ -47,3 +48,4 @@ taller_3_bd_ml/
 │   ├──XGboost.Rmd
 ├── README
 └── .gitignore
+```
