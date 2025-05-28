@@ -29,7 +29,8 @@ p_load(
   Matrix,
   text2vec,
   irlba,
-  stopwords
+  stopwords,
+  stargazer
   )
 ```
 
@@ -678,8 +679,7 @@ data <- data %>%
     lujo = if_else(str_detect(tolower(description_clean), "lujo"), 1, 0),
     balcon = if_else(str_detect(tolower(description_clean), "balc[oó]n"), 1, 0),
     remodelado = if_else(str_detect(tolower(description_clean), "remodelad[oa]"), 1, 0),
-    vista = if_else(str_detect(tolower(description_clean), "vista"), 1, 0),
-    terraza = if_else(str_detect(tolower(description_clean), "terraza"), 1, 0)
+    vista = if_else(str_detect(tolower(description_clean), "vista"), 1, 0)
   ) %>%
   # Asegurar que las nuevas variables sean numéricas
   dplyr::mutate(across(c(lujo, balcon, remodelado, vista, terraza), as.numeric))
@@ -764,8 +764,7 @@ train_clean <- data %>%
   filter(dataset == "train") 
 
 test_clean <- data %>%
-  filter(dataset == "test") 
-
+  filter(dataset == "test")
 ```
 
 # Exportando los archivos
@@ -773,4 +772,99 @@ test_clean <- data %>%
 ```{r}
 write_rds(train_clean, file.path(raw_data_path, 'train.rds'))
 write_rds(test_clean, file.path(raw_data_path, 'test.rds'))
+```
+# Generación de mapas
+```{r}
+# Mapa de movilidad
+mapa_movilidad <- ggplot() +
+  # Localidades (polígonos)
+  geom_sf(data = localidades_sf, aes(color = "Localidades"), fill = "gray90", size = 0.3) +
+  geom_sf(data = sitp_sf, aes(color = "Estaciones SITP"), size = 0.1, shape = 21) +
+  geom_sf(data = ciclorutas_sf, aes(color = "Ciclorutas"), size = 0.3) +
+
+  scale_color_manual(
+    name = "Elementos del mapa",
+    values = c(
+      "Localidades" = "white",
+      "Estaciones SITP" = "red",
+      "Ciclorutas" = "blue"
+    )
+  ) +
+
+  # Estética general
+  theme_minimal() +
+  labs(
+    title = "Universidades, Hospitales y CAI de Policía"
+  )
+
+ggsave("mapa_ciudad1.png", plot = mapa_movilidad, width = 10, height = 8, dpi = 300)
+
+```
+
+
+```{r}
+# Mapa de universidades hospitales y CAI de policía
+univ_sf <- univ_sf$osm_points
+hospital_sf <- hospital_sf$osm_points
+
+mapa_movilidad <- ggplot() +
+  geom_sf(data = localidades_sf, aes(color = "Localidades"), fill = "gray90", size = 0.3) +
+  geom_sf(data = univ_sf, aes(color = "Universidades"), size = 0.1, shape = 21) +
+  geom_sf(data = hospital_sf, aes(color = "Hospitales"), size = 0.1, shape = 21) +
+  geom_sf(data = policia_sf, aes(color = "CAI de Policía"), size = 0.1, shape = 21) +
+  scale_color_manual(
+    name = "Elementos del mapa",
+    values = c(
+      "Localidades" = "white",
+      "Universidades" = "green",
+      "Hospitales" = "lightblue",
+      "CAI de Policía" = "blue"
+    )
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Universidades, Hospitales y CAI de Policía"
+  )
+
+ggsave("mapa_ciudad2.png", plot = mapa_movilidad, width = 10, height = 8, dpi = 300)
+```
+
+# Generación de estadísticas descriptivas
+```{r}
+features <- c(
+  "price", "surface_covered", "bedrooms", "bathrooms", "cai_mts", "tm_mts",
+  "sitp_100m", "ciclorutas_mts", "parque_mts", "univ_mts", "hospital_mts"
+  )
+
+estadisticas <- train %>% 
+  select(features) %>% 
+  mutate(
+    price = price / 1000000,
+    across(where(is.numeric), ~ round(., 2))) %>% 
+  st_drop_geometry() %>%
+  as.data.frame()
+
+stargazer(estadisticas,
+          type = "latex",
+          title = "Table 1. Estadísticas descriptivas", 
+          align = TRUE,
+          no.space = TRUE,
+          omit = c(5),
+          nobs = FALSE,
+          median = TRUE,
+          covariate.labels = c(
+            "Precio", "Área construida", "Dormitorios", "Baños", "Distancia a CAI", 
+            "Distancia a estación de Transmilenio", "Estaciones SITP 100m", 
+            "Distancia a cicloruta", "Distancia a parque", "Distancia a universidad", 
+            "Distancia a hospital"
+            ),
+          notes = c(
+            "Número de observaciones: 38644. Nuestra variable explicada es el precio del inmueble\\\\",
+            "expresado en expresado en millones de pesos colombianos (COP). Las variables que incluyen '100m' \\\\",
+            "corresponden a la cantidad de elementos en 100 metros a la redonde para cada predio. "
+          ),
+          notes.append = FALSE,
+          out = file.path(raw_data_path, "2_1_table_estadisticas_descriptivas.tex")
+          )
+
 ```

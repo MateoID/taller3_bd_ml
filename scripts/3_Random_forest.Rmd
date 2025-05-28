@@ -1,6 +1,6 @@
 ---
 title: "random_forest"
-output: html_document
+output: null
 date: "2025-05-14"
 ---
 
@@ -42,7 +42,8 @@ train <- train %>%
     'upl', 
     'description_clean',
     'dataset',
-    'title_clean'
+    'title_clean',
+    'price_millions'
             )) %>% 
   as.data.frame()
 
@@ -61,52 +62,17 @@ inTrain <- createDataPartition(
 bd_tr <- train %>% filter(row_number() %in% inTrain)       # Conjunto de entrenamiento
 bd_validation  <- train %>% filter(!row_number() %in% inTrain)
 ```
-
+# Especificación del modelo con todas las variables excepto algunas
 ```{r}
 exclusion_vars <- c("price", "property_id", "geometry", "lon_raw", "lat_raw")
 
 predictors <- setdiff(names(bd_tr), exclusion_vars)
 
-# Unir los nombres con "+"
 rhs <- paste(predictors, collapse = " + ")
 
-# Crear la fórmula
 especification_forest <- as.formula(paste("price ~", rhs))
 ```
-```{r}
-# --- CONFIGURACIÓN DEL MODELO RANDOM FOREST ---
-set.seed(1905)  # Reproducibilidad
-
-# Parámetros de control:
-# - method = "oob": Usa Out-of-Bag error para validación
-fitControl <- trainControl(method = "oob")
-
-# Grid de hiperparámetros:
-# - mtry: 3 a 5 variables por división
-# - splitrule: "gini" (impureza de Gini)
-# - min.node.size: Tamaño mínimo de nodo = 13
-tree_grid <- expand.grid(
-    mtry = 8,
-    splitrule = "variance",
-    min.node.size = 2
-)
-
-# Entrenamiento del modelo:
-# - method = "ranger": Implementación eficiente de RF
-# - num.trees = 500: Número de árboles
-# - importance = "impurity": Calcula importancia de variables
-model_forest <- train(
-    especification_forest,        # Fórmula definida previamente
-    data = bd_tr,                 # Datos balanceados
-    method = "ranger",  
-    trControl = fitControl,
-    tuneGrid = tree_grid,
-    num.trees = 1000,
-    importance = "permutation"
-)
-```
-
-
+# Ajuste del modelo Random Forest
 ```{r}
 # --- CONFIGURACIÓN DEL MODELO RANDOM FOREST CON VALIDACIÓN CRUZADA ESPACIAL ---
 
@@ -130,7 +96,7 @@ modelo_rf <- rand_forest(
   mode = "regression",
   trees = 1000,
   mtry = tune(),
-  min_n = (),
+  min_n = tune(),
   ) %>% 
   set_engine(
     "ranger",
@@ -139,8 +105,8 @@ modelo_rf <- rand_forest(
     )
 
 grid <- expand.grid(
-  mtry = c(9, 21, 29, 37),
-  min_n = c(2, 4, 6, 8)
+  mtry = c(9, 18, 29, 37),
+  min_n = c(2, 6, 10, 14)
 )
 
 workflow <- workflow() %>%
@@ -152,40 +118,39 @@ tree_grid <- tune_grid(
   workflow,
   resamples = block_folds,
   grid = grid,
-  metrics = metric_set(mae),
+  metrics = metric_set(yardstick::mae),
   control = control_grid(save_pred = TRUE)
 )
 
 collect_metrics(tree_grid)
-```
 
-```{r}
 best_params <- select_best(tree_grid, metric = "mae")
 
 final_wf <- finalize_workflow(workflow, best_params)
 
-final_fit <- fit(final_wf, data = train)
-
-final_fit <- workflow %>%
-  fit(data = train)
+final_fit <- fit(final_wf, data = bd_tr)
 ```
-
+# Cálculo de MAE en set de validación
 ```{r}
-pred <- predict(final_fit, new_data = bd_validation[, predictors])
+bd_pred_cv <- bd_validation %>%
+  mutate(price_hat = predict(final_fit, new_data = bd_validation)$.pred) %>% 
+  select(
+    'property_id',
+    'price',
+    'price_hat'
+  ) %>% 
+  as.data.frame()
 
-bd_validation <- bd_validation %>% 
-  mutate(price_hat = pred$.pred)
-
-results_df <- data.frame(
-  truth = bd_validation$price,
-  estimate = bd_validation$price_hat
-)
-
-# Calcular MAE correctamente
-mae_result1 <- mae(bd_validation, truth = price, estimate = price_hat)
-print(mae_result1)
+#MAE
+mae_result2 <- mean(abs(bd_pred_cv$price - bd_pred_cv$price_hat))
+print(mae_result2)
 ```
-
+# Cálculo de RMSE en set de validación
+```{r}
+rmse_result2 <- sqrt(mean((bd_pred_cv$price_hat - bd_pred_cv$price)^2))
+print(rmse_result2)
+```
+# Generación de predicciones fuera de muestra
 ```{r}
 test <- test %>% 
   select(-c(
@@ -203,15 +168,16 @@ test <- test %>%
     'upl', 
     'description_clean',
     'dataset',
-    'title_clean'
-            )) %>% 
+    'title_clean',
+    'price_millions'
+            )) %>%
   as.data.frame()
 
-pred <- predict(final_fit, new_data = test[, predictors])
+pred <- predict(final_fit, new_data = test)$.pred
 
 test <- test %>% 
   select('property_id') %>% 
-  mutate(price = pred$.pred)
+  mutate(price = pred)
 ```
 ```{r}
 write_csv(test, 'RF_mtry_29_minnode_2_cv_10.csv')
