@@ -32,8 +32,6 @@ tzcode source: internal
 
 # Repositorio
 
-Falta organizarlo 
-
 ```plaintext
 taller_3_bdml/
 ├───data
@@ -54,6 +52,7 @@ taller_3_bdml/
 │   ├──6_Superlearner.Rmd
 │   ├──8_XGBoost_CVnormal.Rmd
 |   ├──9_XGboost_CV_espacial.Rmd
+|   ├──taller3_bd_ml.Rproj
 ├── README
 └── .gitignore
 ```
