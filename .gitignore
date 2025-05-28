@@ -16,3 +16,8 @@ data/.csv
 .sh
 scripts/Prueba_PCA_2.R
 scripts/Prueba_PCA.R
+scripts/RegresionEN.Rmd
+scripts/ElasticNet_regression_3.R
+scripts/RegresionEN.Rmd
+scripts/RegresionEN.Rmd
+scripts/RegresionEN.Rmd

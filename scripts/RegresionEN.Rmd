@@ -30,7 +30,10 @@ test <- readRDS("../data/test.rds")
 
 
 
-
+Pasos generales: 
+1. Separar Y y X en dos matrices sin NAs
+2. Correr el glmnet standarizando todo
+3. Armar una grilla para probar diferentes Lambda usando caret
 
 
 
