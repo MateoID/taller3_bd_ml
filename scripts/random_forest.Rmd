@@ -130,7 +130,7 @@ modelo_rf <- rand_forest(
   mode = "regression",
   trees = 1000,
   mtry = tune(),
-  min_n = ()
+  min_n = (),
   ) %>% 
   set_engine(
     "ranger",

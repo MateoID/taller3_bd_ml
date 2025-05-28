@@ -69,35 +69,7 @@ val_set <- db_train[-key, ]
 ```
 
 ```{r}
-#Definición de la grilla 
-grid <- expand.grid(cp = 0.001)
-
-#Especificación sencilla 
-cart_model_1 <- price ~ 
-  property_type + cai_mts + tm_mts + sitp_100m + ciclorutas_mts + invasiones_100m +   median_m2  + parqueaderos + parque + avenidas  + 
-  gimnasio + duplex + piscina + hospital_mts + univ_mts + rooms_density + transport_score
-  
-
-#Entrenamiento del modelo con validación cruzada
-db_modelo_clean <- train_set %>% 
-  drop_na(all_of(train_set))
-
-modelo_cart_1 <- train(cart_model_1,
-                      data = train_set,
-                      method = "rpart", 
-                      trControl = trainControl(method = 'cv', number = 5),
-                      tuneGrid = grid,
-                      metric = "RMSE")
-
-# Visualiza el mejor hiperparámetro
-modelo_cart_1$bestTune
-
-#Visualización del árbol 
-rpart.plot(modelo_cart_1$finalModel)
-
-#Métricas de validación cruzada
-#print(modelo_cart_1)
-
+a 
 ```
 
 ```{r}
