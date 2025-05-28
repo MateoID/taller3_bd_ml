@@ -1,26 +1,15 @@
-```{r}
-# library(reticulate)
-# 
-# conda_create("r-tensorflow", packages = "python=3.11")
-# use_condaenv("r-tensorflow", required = TRUE)
-# 
-# py_install(c("tensorflow-macos", "tensorflow-metal", "keras"), pip = TRUE)
-# 
-# library(tensorflow)
-# library(keras)
-# print(tf$config$list_physical_devices())
-
-```
 
 ```{r}
-raw_data_path <- './data'
+# rutas relativas
+raw_data_path <- '../data'
+predictions_path <- '../results/predictions'
 db_train <- readRDS(file.path(raw_data_path, 'train.rds'))
 db_test <- readRDS(file.path(raw_data_path, 'test.rds'))
 
 # Verificando la estructura de la base de datos 
-str(db_train)  
-head(db_train)
-summary(db_train)
+# str(db_train)  
+# head(db_train)
+# summary(db_train)
 
 #Modificando variables relevantes 
 db_train$property_type <- as.factor(db_train$property_type)
@@ -30,7 +19,7 @@ db_train$upl <- as.factor(db_train$upl)
 
 
 ```{r}
-
+# librerias
 library(tidyverse)
 library(sf)
 library(caret)
@@ -48,6 +37,14 @@ library(tensorflow)
 library(keras)
 
 
+
+```
+
+
+```{r}
+# -----------------------------
+# UNIFICAR Y PREPROCESAR
+# -----------------------------
 clean_text <- function(text) {
   text %>%
     tolower() %>%
@@ -55,62 +52,13 @@ clean_text <- function(text) {
     str_squish()
 }
 
-# -----------------------------
-# 2. UNIFICAR Y PREPROCESAR
-# -----------------------------
 data <- bind_rows(
-  train %>% mutate(dataset = "train"),
-  test %>% mutate(dataset = "test")
+  db_train %>% dplyr::mutate(dataset = "train"),
+  db_test %>% dplyr::mutate(dataset = "test")
 )
 
-stopifnot(all(c("median_m2", "tm_mts", "sitp_100m", "ciclorutas_mts", "parque",
-                "avenidas", "invasiones_100m") %in% names(data)))
-
-data <- data %>%
-  mutate(
-    description_clean = clean_text(description),
-    title_clean = clean_text(title),
-    has_balcon = as.numeric(str_detect(description_clean, "balc|terraza")),
-    has_chimenea = as.numeric(str_detect(description_clean, "chimenea")),
-    has_gimnasio = as.numeric(str_detect(description_clean, "gimnasio")),
-    has_piscina = as.numeric(str_detect(description_clean, "piscina")),
-    has_duplex = as.numeric(str_detect(description_clean, "duplex")),
-    surface_total = ifelse(surface_total > 500, NA, surface_total),
-    surface_total = ifelse(is.na(surface_total), median_m2, surface_total),
-    rooms_density = rooms / (surface_total + 1),
-    covered_ratio = surface_covered / (surface_total + 1),
-    years_since_construction = 2023 - year,
-    transport_score = sitp_100m + tm_mts,
-    environment_score = ciclorutas_mts + avenidas + parque + invasiones_100m,
-    localidad_fct = fct_lump_n(as.factor(localidad), n = 10),
-    price_millions = price / 1e6
-  )
-
-```
-
-```{r}
 # -----------------------------
-# 3. TF-IDF + PCA CON IRLBA
-# -----------------------------
-it <- itoken(data$description_clean, progressbar = FALSE)
-vocab <- create_vocabulary(it, stopwords = stopwords::stopwords("es")) %>%
-  prune_vocabulary(term_count_min = 5)
-vectorizer <- vocab_vectorizer(vocab)
-dtm <- create_dtm(it, vectorizer)
-
-# PCA eficiente con 50 componentes
-tfidf <- TfIdf$new()
-dtm_tfidf <- tfidf$fit_transform(dtm)
-tfidf_pca <- prcomp_irlba(dtm_tfidf, n = 50)
-X_text_pca <- as.data.frame(tfidf_pca$x)
-colnames(X_text_pca) <- paste0("text_pca_", 1:ncol(X_text_pca))
-
-data <- bind_cols(data, X_text_pca)
-```
-
-```{r}
-# -----------------------------
-# 4. SEPARAR TRAIN Y TEST
+# SEPARAR TRAIN Y TEST
 # -----------------------------
 features <- c("surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos",
               "has_balcon", "has_chimenea", "has_gimnasio", "has_piscina", "has_duplex",
@@ -118,66 +66,86 @@ features <- c("surface_total", "rooms", "bedrooms", "bathrooms", "parqueaderos",
               "transport_score", "environment_score",
               paste0("text_pca_", 1:50))
 
-train_clean <- data %>%
+train_clean_full <- data %>%
   filter(dataset == "train") %>%
-  st_drop_geometry() %>%
+  sf::st_drop_geometry() %>% # Usar sf::st_drop_geometry si st_drop_geometry no está cargado
   select(all_of(features), localidad_fct, price_millions) %>%
-  drop_na(price_millions)
+  drop_na(price_millions) # Asegura que la variable respuesta no tenga NA
 
-test_clean <- data %>%
+test_clean_kaggle <- data %>%
   filter(dataset == "test") %>%
-  st_drop_geometry() %>%
+  sf::st_drop_geometry() %>% # Usar sf::st_drop_geometry
   select(all_of(features), localidad_fct, property_id)
-```
 
-```{r}
-# -----------------------------
-# 5. PREPROCESAMIENTO NUMÉRICO + OHE
-# -----------------------------
+# ------------------------------------------------
+# SEPARAR TRAIN ORIGINAL EN TRAIN Y TEST INTERNAS 
+# ------------------------------------------------
+# Paso 2.1: Particionar train_clean_full para evaluación interna
+set.seed(42) # Para reproducibilidad
+index_train_internal <- createDataPartition(
+  y = train_clean_full$price_millions,
+  p = 0.8, # 80% para entrenamiento interno, 20% para prueba interna
+  list = FALSE
+)
 
-# Asegurarse de que localidad_fct no tenga NA explícitos
-train_clean$localidad_fct <- fct_explicit_na(train_clean$localidad_fct, na_level = "missing")
-test_clean$localidad_fct <- fct_explicit_na(test_clean$localidad_fct, na_level = "missing")
+train_internal <- train_clean_full[index_train_internal, ]
+test_internal <- train_clean_full[-index_train_internal, ]
 
-# Imputación + normalización de variables numéricas
-preproc <- preProcess(train_clean[, features], method = c("medianImpute", "center", "scale", "YeoJohnson"))
-
-# Aplicar transformación a train/test
-X_train <- predict(preproc, train_clean[, features])
-X_test <- predict(preproc, test_clean[, features])
-
-# Verificación de NA antes de OHE
-cat("NA en X_train antes de dummies:", anyNA(X_train), "\n")
-
-# One-hot encoding de localidad
-dummies <- dummyVars(~ localidad_fct, data = train_clean)
-X_train_dummies <- predict(dummies, train_clean)
-X_test_dummies <- predict(dummies, test_clean)
-
-# Unión final
-X_train <- cbind(X_train, X_train_dummies)
-X_test <- cbind(X_test, X_test_dummies)
-
-# Verificación final
-cat("NA en X_train final:", anyNA(X_train), "\n")
-cat("NA en X_test final:", anyNA(X_test), "\n")
-
-# -----------------------------
-# 6. MATRICES PARA XGBOOST
-# -----------------------------
-dtrain <- xgb.DMatrix(data = as.matrix(X_train), label = log1p(train_clean$price_millions))
-dtest <- xgb.DMatrix(data = as.matrix(X_test))
+# Separar la variable respuesta para el conjunto de prueba interno
+y_train_internal <- train_internal$price_millions
+y_test_internal_real <- test_internal$price_millions
 
 ```
 
-```{r}
-library(keras)
-library(tensorflow)
 
-# Convertir los datos a matrices numéricas (en caso de que no lo estén)
-X_train_mat <- as.matrix(X_train)
-X_test_mat <- as.matrix(X_test)
-y_train <- train_clean$price_millions
+```{r}
+# Paso 3.1: Asegurarse de que localidad_fct no tenga NA explícitos en todos los conjuntos
+train_internal$localidad_fct <- fct_explicit_na(train_internal$localidad_fct, na_level = "missing")
+test_internal$localidad_fct <- fct_explicit_na(test_internal$localidad_fct, na_level = "missing")
+test_clean_kaggle$localidad_fct <- fct_explicit_na(test_clean_kaggle$localidad_fct, na_level = "missing")
+
+
+# Paso 3.2: Imputación + normalización de variables numéricas (ajustado en train_internal)
+preproc <- preProcess(train_internal[, features], method = c("medianImpute", "center", "scale", "YeoJohnson"))
+
+# Aplicar transformación a los conjuntos internos
+X_train_internal_processed <- predict(preproc, train_internal[, features])
+X_test_internal_processed <- predict(preproc, test_internal[, features])
+
+# Aplicar transformación al conjunto de Kaggle
+X_test_kaggle_processed <- predict(preproc, test_clean_kaggle[, features])
+
+
+# Paso 3.3: Asegurando que 'parqueaderos' sea numérica (después de preProcess)
+# Aunque preProcess debería manejar esto, esta línea refuerza la intención.
+# Si parkeaderos fue imputado, ya será numérico.
+X_train_internal_processed$parqueaderos <- as.numeric(X_train_internal_processed$parqueaderos)
+X_test_internal_processed$parqueaderos <- as.numeric(X_test_internal_processed$parqueaderos)
+X_test_kaggle_processed$parqueaderos <- as.numeric(X_test_kaggle_processed$parqueaderos)
+
+
+# Paso 3.4: One-hot encoding de localidad (ajustado en train_internal)
+# Es crucial que los niveles de los factores sean los mismos entre train y test.
+# dummyVars automáticamente maneja los niveles que solo aparecen en test o en train.
+dummies <- dummyVars(~ localidad_fct, data = train_internal) # Ajustar dummies en train_internal
+
+X_train_dummies_internal <- predict(dummies, train_internal)
+X_test_dummies_internal <- predict(dummies, test_internal)
+X_test_dummies_kaggle <- predict(dummies, test_clean_kaggle)
+
+
+# Paso 3.5: Unión final y conversión a matrices
+X_train_mat <- as.matrix(cbind(X_train_internal_processed, X_train_dummies_internal))
+X_test_mat_internal <- as.matrix(cbind(X_test_internal_processed, X_test_dummies_internal))
+X_test_mat_kaggle <- as.matrix(cbind(X_test_kaggle_processed, X_test_dummies_kaggle))
+
+# Verificación de NAs en las matrices finales
+cat("NA en X_train_mat:", anyNA(X_train_mat), "\n")
+cat("NA en X_test_mat_internal:", anyNA(X_test_mat_internal), "\n")
+cat("NA en X_test_mat_kaggle:", anyNA(X_test_mat_kaggle), "\n")
+```
+
+```{r }
 
 # Definir el modelo
 model <- keras_model_sequential() %>%
@@ -188,7 +156,7 @@ model <- keras_model_sequential() %>%
   layer_dense(units = 32, activation = "relu") %>%
   layer_dense(units = 1)
 
-# Compilar el modelo: usar pérdida MSE y optimizador Adam
+# Compilar el modelo
 model %>% compile(
   loss = "mse",
   optimizer = optimizer_adam(),
@@ -201,36 +169,40 @@ summary(model)
 # Entrenamiento
 history <- model %>% keras::fit(
   x = X_train_mat,
-  y = y_train,
-  epochs = 10,
+  y = y_train_internal,
+  epochs = 10, # Aumente las épocas para permitir que Early Stopping actúe
   batch_size = 32,
-  validation_split = 0.2,
+  validation_split = 0.2, # Este validation_split se aplica SOBRE X_train_mat
   callbacks = list(callback_early_stopping(monitor = "val_loss", patience = 10, restore_best_weights = TRUE)),
   verbose = 2
 )
 
-# Predicciones para test (predicción directa)
-predictions <- model %>% predict(X_test_mat)
 
-# Puedes revisar las primeras predicciones
-head(predictions)
+
 ```
 
 ```{r}
+# Sacando el MAE y el RMSE usando un set de validación sacado del df de train original 
+# Predecir en el conjunto de test interno
+y_test_internal_pred <- model %>% predict(X_test_mat_internal) %>% as.vector()
+
+# Calcular métricas
+mae_internal <- mean(abs(y_test_internal_pred - y_test_internal_real))
+rmse_internal <- sqrt(mean((y_test_internal_pred - y_test_internal_real)^2))
+
+cat("MAE (test interno):", mae_internal, "\n")
+cat("RMSE (test interno):", rmse_internal, "\n")
+```
+```{r}
+# Predecir en el conjunto de test de Kaggle
+y_test_kaggle_pred <- model %>% predict(X_test_mat_kaggle) %>% as.vector()
+
+# Crear dataframe con las predicciones (asumiendo que test_clean_kaggle tiene property_id)
 submission <- data.frame(
-  property_id = test_clean$property_id,
-  price = as.vector(predictions * 1e6) 
+  property_id = test_clean_kaggle$property_id,
+  price_millions = y_test_kaggle_pred
 )
 
-# Guardar el CSV
-write.csv(submission, file = "submission_RN_10epoc.csv", row.names = TRUE)
-
-# Predicciones sobre training
-preds_train <- model %>% predict(X_test_mat) %>% as.vector()
-# preds_train_exp <- expm1(preds_train)
-
-# Error absoluto medio (en millones)
-mae <- mean(abs(preds_train - train_clean$price_millions))
-print(paste("MAE en entrenamiento (millones):", round(mae, 2)))
-
+# Guardar las predicciones (opcional)
+write.csv(submission, file.path(predictions_path,"predictions_redes_neuronales.csv"), row.names = FALSE)
 ```
